@@ -1,5 +1,5 @@
 -- ══════════════════ CORVUS HUB — by Dastan ══════════════════
--- Auto Tap | Auto Equip Best (Clicks) | Auto Open Void egg (x8, no animation) | Auto Gold (hatch pause -> craft all -> back)
+-- Auto Tap | Auto Equip Best (Clicks) | Auto Open Void egg (x8, no animation) | Auto Craft (Golden > Diamond > Rainbow, then back to the egg)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -183,19 +183,31 @@ Main:CreateToggle({
     end,
 })
 
--- ═══════════ AUTO GOLD ═══════════
--- Storage nearly full (fewer free slots than one x8 hatch needs) -> pause the egg, go to the Golden machine circle,
--- craft EVERY set of 6 same pets, go back to where you were, resume the egg. Repeats forever.
-local SOURCE_TIER, NEED = "Normal", 6
+-- ═══════════ AUTO CRAFT: Golden -> Diamond -> Rainbow ═══════════
+-- Storage nearly full (fewer free slots than one x8 hatch needs) -> pause the egg, then in this order, each step only
+-- while the storage is STILL full after the previous one:
+--   1. Golden machine: every set of 6 same Normal pets            (MachineCraftRequested Craft, Machine="Golden")
+--   2. Diamond machine: every set of 5 same Golden pets           (Machine="Diamond")
+--   3. Rainbow machine: claim finished pods, start pods with 5 same Diamond pets (Machine="Shiny", Start/Claim; 30 s each)
+-- then teleport back to where you were and resume the egg. The crafting menus/cutscenes are kept closed meanwhile.
+local MenuController
+pcall(function() MenuController = require(ReplicatedStorage.Controllers.UI.MenuController) end)
 
-local function GetGroups()
+local STAGES = {
+    { machine = "Golden",  point = "Golden",  tier = "Normal", need = 6 },
+    { machine = "Diamond", point = "Diamond", tier = "Golden", need = 5 },
+}
+local RAINBOW = { machine = "Shiny", point = "Rainbow", tier = "Diamond", need = 5, maxQueue = 3 }
+
+-- pets of one tier grouped by name, skipping locked / frozen / equipped ones
+local function GetGroups(tier)
     local data = GetData()
     if not (data and type(data.Pets.Owned) == "table") then return nil end
     local equipped = {}
     for _, id in ipairs(data.Pets.Equipped or {}) do equipped[id] = true end
     local groups = {}
     for id, pet in pairs(data.Pets.Owned) do
-        if type(pet) == "table" and pet.Tier == SOURCE_TIER and pet.Locked ~= true and pet.Frozen == nil
+        if type(pet) == "table" and pet.Tier == tier and pet.Locked ~= true and pet.Frozen == nil
             and not equipped[id] and type(pet.Name) == "string" then
             local g = groups[pet.Name]
             if not g then g = {} groups[pet.Name] = g end
@@ -205,20 +217,32 @@ local function GetGroups()
     return groups
 end
 
-local function CountSets()
-    local groups = GetGroups()
-    local sets = 0
-    for _, ids in pairs(groups or {}) do sets += math.floor(#ids / NEED) end
-    return sets
+-- the biggest complete set for a stage, or nil
+local function PickSet(stage)
+    local groups = GetGroups(stage.tier)
+    if not groups then return nil end
+    local best
+    for _, ids in pairs(groups) do
+        if #ids >= stage.need and (not best or #ids > #best) then best = ids end
+    end
+    if not best then return nil end
+    local use = {}
+    for i = 1, stage.need do use[i] = best[i] end
+    return use
 end
 
--- the circle you stand on to open the machine: a part tagged "InteractionPoint" named "Golden".
--- We stand at the middle of it ON THE FLOOR (ray down from the middle), not at the middle of its box.
-local function MachineTarget()
+local function Full()
+    local n, limit = Storage()
+    return n ~= nil and limit - n < COUNT
+end
+
+-- the circle you stand on to open a machine: a part tagged "InteractionPoint" named Golden / Diamond / Rainbow.
+-- We stand at its middle ON THE FLOOR (ray down from the middle), not at the middle of its box.
+local function MachineTarget(pointName)
     local hrp = GetHrp()
     local best, bestDist
     for _, p in ipairs(CollectionService:GetTagged("InteractionPoint")) do
-        if p.Name == "Golden" then
+        if p.Name == pointName then
             local cf, size
             if p:IsA("BasePart") then cf, size = p.CFrame, p.Size
             elseif p:IsA("Model") then cf, size = p:GetBoundingBox() end
@@ -230,7 +254,7 @@ local function MachineTarget()
     end
     if not best then return nil end
     local pos = best.cf.Position
-    local y = pos.Y - best.size.Y / 2 + 3 -- fallback: bottom of the zone
+    local y = pos.Y - best.size.Y / 2 + 3
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { LocalPlayer.Character }
@@ -248,132 +272,191 @@ local function TeleportTo(pos, settle)
     return true
 end
 
-local function GoToMachine()
-    local target = MachineTarget()
-    if not target then return false end
+local function GoTo(pointName)
+    local target = MachineTarget(pointName)
     local hrp = GetHrp()
-    if not hrp then return false end
+    if not (target and hrp) then return false end
     if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 0.6) end
     return true
 end
 
--- hide the crafting GUI/cutscene while we craft (client-only visuals)
-local HideUntil, Hidden = 0, {}
-local function IsCraftGui(g)
-    if not g:IsA("ScreenGui") then return false end
-    local n = string.lower(g.Name)
-    return string.find(n, "machine", 1, true) or string.find(n, "golden", 1, true) or string.find(n, "craft", 1, true)
-end
+-- ── keep the crafting GUI closed while we craft (menus + the 3D stage are client-only) ──
+local CRAFT_MENUS = { "Golden", "Diamond", "CraftingRoll", "RainbowFuse", "RainbowMachine", "RainbowCraft", "GoldenBulk", "DiamondOld" }
+local CraftMenuSet = {}
+for _, n in ipairs(CRAFT_MENUS) do CraftMenuSet[n] = true end
+local Hiding, HideConn, Hidden = false, nil, {}
+
 local function HideCraftGuis()
-    HideUntil = os.clock() + 20
+    if MenuController then
+        for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+    end
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
     for _, g in ipairs(pg:GetChildren()) do
-        if IsCraftGui(g) and g.Enabled then g.Enabled = false Hidden[g] = true end
+        if g:IsA("ScreenGui") and CraftMenuSet[g.Name] and g.Enabled then
+            g.Enabled = false
+            Hidden[g] = true
+        end
     end
 end
-local function RestoreGuis()
-    HideUntil = 0
+
+local function StartHiding()
+    if Hiding then return end
+    Hiding = true
+    HideCraftGuis()
+    HideConn = RunService.Heartbeat:Connect(HideCraftGuis)
+end
+
+local function StopHiding()
+    Hiding = false
+    if HideConn then HideConn:Disconnect() HideConn = nil end
     for g in pairs(Hidden) do pcall(function() if g.Parent then g.Enabled = true end end) end
     Hidden = {}
 end
-pcall(function()
-    LocalPlayer:WaitForChild("PlayerGui").ChildAdded:Connect(function(child)
-        if os.clock() < HideUntil and IsCraftGui(child) then
-            task.defer(function() pcall(function() child.Enabled = false Hidden[child] = true end) end)
-        end
-    end)
-end)
 
+-- ── server answers ──
 local ResultSeq, LastResult = 0, nil
 if MachineResultEvent then
     MachineResultEvent.OnClientEvent:Connect(function(r)
-        if type(r) == "table" and r.Action ~= "Start" and r.Action ~= "Claim" then
+        if type(r) == "table" then
             ResultSeq += 1
             LastResult = r
         end
     end)
 end
 
--- one craft: "ok" | "none" (no complete set) | "fail", reason
-local function CraftOnce()
-    local groups = GetGroups()
-    if not groups then return "fail", "pet data not ready" end
-    local best
-    for _, ids in pairs(groups) do
-        if #ids >= NEED and (not best or #ids > #best) then best = ids end
-    end
-    if not best then return "none" end
-    local use = {}
-    for i = 1, NEED do use[i] = best[i] end
-    HideCraftGuis()
+-- fires one machine request and waits for the answer. `done()` returns true when the data shows it went through.
+local function Request(args, done)
     local seq0 = ResultSeq
-    local ok, err = pcall(function()
-        MachineEvent:FireServer({ PetIds = use, Machine = "Golden", Action = "Craft" })
-    end)
-    if not ok then return "fail", tostring(err) end
+    local ok, err = pcall(function() MachineEvent:FireServer(args) end)
+    if not ok then return false, tostring(err) end
     local t0 = os.clock()
     while os.clock() - t0 < 6 and ResultSeq == seq0 do
-        local data = GetData()
-        if data and data.Pets.Owned[use[1]] == nil then return "ok" end -- consumed, result may lag
+        if done and done() then return true end
         task.wait(0.05)
     end
     if ResultSeq > seq0 then
-        if LastResult.Success == true then return "ok" end
-        return "fail", tostring(LastResult.Error or LastResult.Message or LastResult.Reason or "refused")
+        if LastResult.Success == true then return true end
+        return false, tostring(LastResult.Error or LastResult.Message or LastResult.Reason or "refused")
     end
-    return "fail", "no answer from the server"
+    if done and done() then return true end
+    return false, "no answer from the server"
 end
 
-local function CraftAll()
-    if not GoToMachine() then warn("[Gold] machine circle not found") return 0 end
+local function PetsGone(ids)
+    return function()
+        local data = GetData()
+        return data ~= nil and data.Pets.Owned[ids[1]] == nil
+    end
+end
+
+-- crafts every complete set of one stage; returns how many went through
+local function CraftStage(stage)
+    if not PickSet(stage) then return 0 end
+    if not GoTo(stage.point) then warn("[Craft] " .. stage.machine .. " machine circle not found") return 0 end
     local crafted, fails = 0, 0
     while true do
-        local status, why = CraftOnce()
-        if status == "ok" then
+        local use = PickSet(stage)
+        if not use then break end
+        local ok, why = Request({ PetIds = use, Machine = stage.machine, Action = "Craft" }, PetsGone(use))
+        if ok then
             crafted += 1
             fails = 0
             task.wait(0.35)
-        elseif status == "none" then
-            break
         else
             fails += 1
-            warn("[Gold] " .. tostring(why))
+            warn("[Craft] " .. stage.machine .. ": " .. tostring(why))
             if fails >= 4 then break end
             task.wait(math.min(0.5 * 2 ^ (fails - 1), 4))
-            GoToMachine() -- maybe pushed off the circle
+            GoTo(stage.point)
         end
     end
     return crafted
 end
 
-local GoldToken = 0
+-- rainbow pods: Data.Machines.Shiny.Queue[craftId] = { Name, PetCount, EndTime }
+local function RainbowQueue()
+    local data = GetData()
+    local m = data and data.Machines and data.Machines.Shiny
+    return (m and type(m.Queue) == "table") and m.Queue or nil
+end
+
+local function RainbowReadyIds()
+    local q = RainbowQueue()
+    local ready, total, now = {}, 0, workspace:GetServerTimeNow()
+    for id, entry in pairs(q or {}) do
+        total += 1
+        if type(entry) == "table" and type(entry.EndTime) == "number" and entry.EndTime <= now then table.insert(ready, id) end
+    end
+    return ready, total
+end
+
+-- claims finished pods and starts new ones with 5 same Diamond pets (30 s each); returns pets removed from storage
+local function CraftRainbow()
+    local ready, total = RainbowReadyIds()
+    local canStart = total - #ready < RAINBOW.maxQueue and PickSet(RAINBOW) ~= nil
+    if #ready == 0 and not canStart then return 0 end
+    if not GoTo(RAINBOW.point) then warn("[Craft] Rainbow machine circle not found") return 0 end
+    for _, id in ipairs(ready) do
+        local ok, why = Request({ Machine = "Shiny", Action = "Claim", CraftId = id }, function()
+            local q = RainbowQueue()
+            return q ~= nil and q[id] == nil
+        end)
+        if not ok then warn("[Craft] Rainbow claim: " .. tostring(why)) end
+        task.wait(0.35)
+    end
+    local removed, fails = 0, 0
+    while true do
+        local _, queued = RainbowReadyIds()
+        if queued >= RAINBOW.maxQueue then break end
+        local use = PickSet(RAINBOW)
+        if not use then break end
+        local ok, why = Request({ PetIds = use, Machine = "Shiny", Action = "Start" }, PetsGone(use))
+        if ok then
+            removed += #use
+            fails = 0
+            task.wait(0.35)
+        else
+            fails += 1
+            warn("[Craft] Rainbow start: " .. tostring(why))
+            if fails >= 3 then break end
+            task.wait(1)
+        end
+    end
+    return removed
+end
+
+local CraftToken = 0
 Main:CreateToggle({
-    Name = "Auto Gold",
+    Name = "Auto Craft (Golden > Diamond > Rainbow)",
     CurrentValue = false,
     Callback = function(Value)
-        GoldToken += 1
-        local my = GoldToken
+        CraftToken += 1
+        local my = CraftToken
         if not Value then
             EggPaused = false
-            RestoreGuis()
+            StopHiding()
             return
         end
-        if not MachineEvent then warn("[Gold] remote not found") return end
+        if not MachineEvent then warn("[Craft] remote not found") return end
         task.spawn(function()
-            while my == GoldToken do
-                local n, limit = Storage()
-                if n and limit - n < COUNT then
+            while my == CraftToken do
+                if Full() then
                     EggPaused = true
                     task.wait(1.2) -- let hatches in flight land
                     local hrp = GetHrp()
                     local home = hrp and hrp.Position
-                    local crafted = CraftAll()
-                    if home and my == GoldToken then TeleportTo(home + Vector3.new(0, 1, 0), 0.4) end
-                    RestoreGuis()
-                    local n2, limit2 = Storage()
-                    if crafted == 0 or (n2 and limit2 - n2 < COUNT) then
-                        task.wait(2) -- nothing to craft / still full: stay paused, re-check
+                    StartHiding()
+                    local did = 0
+                    for _, stage in ipairs(STAGES) do
+                        if my ~= CraftToken then break end
+                        if Full() then did += CraftStage(stage) end
+                    end
+                    if my == CraftToken and Full() then did += CraftRainbow() end
+                    if home and my == CraftToken then TeleportTo(home + Vector3.new(0, 1, 0), 0.4) end
+                    StopHiding()
+                    if did == 0 or Full() then
+                        task.wait(2) -- nothing to craft yet (rainbow pods still running?): stay paused, re-check
                     else
                         EggPaused = false
                     end
@@ -383,6 +466,7 @@ Main:CreateToggle({
                 end
             end
             EggPaused = false
+            StopHiding()
         end)
     end,
 })
