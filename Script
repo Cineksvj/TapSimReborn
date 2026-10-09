@@ -93,7 +93,36 @@ local function Storage()
 end
 
 -- ═══════════ AUTO OPEN VOID EGG (x8, no animation) ═══════════
-local EGG, COUNT, MAX_INFLIGHT = "Void", 8, 2
+local EGG, MAX_INFLIGHT = "Void", 2
+
+-- hatch count: the biggest one you can use, the way the game's own auto-open picks it:
+-- 8 needs the x8 gamepass (or an OctoHatch boost) and enough coins for 8 eggs, else 3, else 1.
+local GamepassPerks, BoostFormula, EggPricing, LaunchEggConfig
+pcall(function()
+    GamepassPerks = require(ReplicatedStorage.Shared.Monetization.GamepassPerks)
+    BoostFormula = require(ReplicatedStorage.Shared.Items.BoostFormula)
+    EggPricing = require(ReplicatedStorage.Shared.Pets.EggPricing)
+    LaunchEggConfig = require(ReplicatedStorage.Shared.Pets.LaunchEggConfig)
+end)
+local LastCount = 8
+local function HatchCount()
+    local data = GetData()
+    if not data then return LastCount end
+    local ok, n = pcall(function()
+        local has8 = (GamepassPerks and GamepassPerks.Has(data, "x8Egg")) or (BoostFormula and BoostFormula.HasType(data, "OctoHatch"))
+        local coins = (data.Currencies and data.Currencies.Coins) or 0
+        local price = LaunchEggConfig and LaunchEggConfig[EGG] and LaunchEggConfig[EGG].Price
+        local function afford(k)
+            if not (EggPricing and price) then return true end
+            return EggPricing.GetTotal(data, EGG, price, k) <= coins
+        end
+        if has8 and afford(8) then return 8 end
+        if afford(3) then return 3 end
+        return 1
+    end)
+    if ok and type(n) == "number" then LastCount = n end
+    return LastCount
+end
 local Seq, LastClientSeq, InOwnHatch = 0, 0, false
 local EggWanted, EggConn = false, nil
 local EggHolds = 0 -- > 0 while a trip (crafting, digging, ...) keeps the egg paused
@@ -104,7 +133,7 @@ local function FireHatch()
     if LastClientSeq > Seq then Seq = LastClientSeq end -- continue the game's own counter
     Seq += 1
     InOwnHatch = true
-    EggEvent:FireServer({ Egg = EGG, Auto = false, Count = COUNT, Seq = Seq })
+    EggEvent:FireServer({ Egg = EGG, Auto = false, Count = HatchCount(), Seq = Seq })
     InOwnHatch = false
     return Seq
 end
@@ -246,7 +275,7 @@ end
 
 local function Full()
     local n, limit = Storage()
-    return n ~= nil and limit - n < COUNT
+    return n ~= nil and limit - n < HatchCount()
 end
 
 -- the circle you stand on to open a machine: a part tagged "InteractionPoint" named Golden / Diamond / Rainbow.
