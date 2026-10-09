@@ -280,38 +280,44 @@ local function GoTo(pointName)
     return true
 end
 
--- ── keep the crafting GUI closed while we craft (menus + the 3D stage are client-only) ──
+-- ── keep the crafting GUI closed while we craft ──
+-- The game opens the machine menu whenever you stand on the circle and the "CraftingRoll" menu on every result, and each
+-- menu open/close hides and shows the whole HUD through HudController. Forcing the ScreenGuis off every frame fought
+-- that and left the HUD hidden. Now MenuController.Open is simply ignored for the crafting menus while a trip runs, and
+-- the HUD is explicitly shown again when the trip ends.
+local HudController
+pcall(function() HudController = require(ReplicatedStorage.Controllers.UI.HudController) end)
 local CRAFT_MENUS = { "Golden", "Diamond", "CraftingRoll", "RainbowFuse", "RainbowMachine", "RainbowCraft", "GoldenBulk", "DiamondOld" }
 local CraftMenuSet = {}
 for _, n in ipairs(CRAFT_MENUS) do CraftMenuSet[n] = true end
-local Hiding, HideConn, Hidden = false, nil, {}
+local Hiding = false
 
-local function HideCraftGuis()
-    if MenuController then
-        for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+pcall(function()
+    if type(MenuController) ~= "table" or type(MenuController.Open) ~= "function" or table.isfrozen(MenuController) then return end
+    local realOpen = MenuController.Open
+    MenuController.Open = function(self, name, ...)
+        if Hiding and CraftMenuSet[name] then return end
+        return realOpen(self, name, ...)
     end
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return end
-    for _, g in ipairs(pg:GetChildren()) do
-        if g:IsA("ScreenGui") and CraftMenuSet[g.Name] and g.Enabled then
-            g.Enabled = false
-            Hidden[g] = true
-        end
-    end
+end)
+
+local function ShowHud()
+    pcall(function() if HudController then HudController:SetHudHidden(false, "Menu") end end)
 end
 
 local function StartHiding()
-    if Hiding then return end
     Hiding = true
-    HideCraftGuis()
-    HideConn = RunService.Heartbeat:Connect(HideCraftGuis)
+    if MenuController then
+        for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+    end
 end
 
 local function StopHiding()
     Hiding = false
-    if HideConn then HideConn:Disconnect() HideConn = nil end
-    for g in pairs(Hidden) do pcall(function() if g.Parent then g.Enabled = true end end) end
-    Hidden = {}
+    if MenuController then
+        for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+    end
+    task.delay(0.5, ShowHud)
 end
 
 -- ── server answers ──
