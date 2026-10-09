@@ -29,6 +29,7 @@ local PetEvent           = WaitForPath({"RemoteServices", "PetService", "RE", "P
 local EggEvent           = WaitForPath({"RemoteServices", "EggService", "RE", "EggHatchRequested"})
 local MachineEvent       = WaitForPath({"RemoteServices", "MachineService", "RE", "MachineCraftRequested"})
 local MachineResultEvent = WaitForPath({"RemoteServices", "MachineService", "RE", "MachineCraftResult"})
+local EggResultEvent     = WaitForPath({"RemoteServices", "EggService", "RE", "EggHatchResult"})
 
 local function GetHrp()
     local c = LocalPlayer.Character
@@ -92,9 +93,10 @@ local function Storage()
 end
 
 -- ═══════════ AUTO OPEN VOID EGG (x8, no animation) ═══════════
-local EGG, COUNT, BURST = "Void", 8, 5
+local EGG, COUNT, MAX_INFLIGHT = "Void", 8, 2
 local Seq, LastClientSeq, InOwnHatch = 0, 0, false
 local EggWanted, EggPaused, EggConn = false, false, nil
+local Pending, NextSendAt = {}, 0 -- hatch requests waiting for the server answer: [Seq] = sent at
 
 local function FireHatch()
     if LastClientSeq > Seq then Seq = LastClientSeq end -- continue the game's own counter
@@ -102,6 +104,23 @@ local function FireHatch()
     InOwnHatch = true
     EggEvent:FireServer({ Egg = EGG, Auto = false, Count = COUNT, Seq = Seq })
     InOwnHatch = false
+    return Seq
+end
+
+-- The server paces hatches itself (it holds a request until the previous one is done and reports it in `Held`), so
+-- spamming only fills its queue and gets "RateLimited"/"Cancelled" answers. The game's own client keeps the next request
+-- one step "ahead" of the current one. Same here: keep exactly MAX_INFLIGHT requests open, refill the moment one is answered.
+if EggResultEvent then
+    EggResultEvent.OnClientEvent:Connect(function(r)
+        if type(r) ~= "table" then return end
+        if r.Seq ~= nil then Pending[r.Seq] = nil else Pending[next(Pending) or 0] = nil end
+        if r.Success == true or r.Forced == true then return end
+        local wait = (r.Error == "RateLimited" and 0.4) or (r.Error == "Cancelled" and 0.1) or (r.Error == "StorageFull" and 1) or 2
+        NextSendAt = os.clock() + wait
+        if r.Error ~= "RateLimited" and r.Error ~= "Cancelled" and r.Error ~= "StorageFull" then
+            warn("[Egg] " .. tostring(r.Error))
+        end
+    end)
 end
 
 -- learn the game's hatch counter so the server does not drop our requests as old ones
@@ -147,9 +166,18 @@ Main:CreateToggle({
                 if IsHatchGui(g) then pcall(function() g:Destroy() end) end
             end
         end
+        Pending, NextSendAt = {}, 0
         EggConn = RunService.Heartbeat:Connect(function()
-            if EggWanted and not EggPaused then
-                for _ = 1, BURST do FireHatch() end
+            if not EggWanted or EggPaused then return end
+            local now = os.clock()
+            if now < NextSendAt then return end
+            local open = 0
+            for seq, sentAt in pairs(Pending) do
+                if now - sentAt > 12 then Pending[seq] = nil else open += 1 end
+            end
+            while open < MAX_INFLIGHT do
+                Pending[FireHatch()] = now
+                open += 1
             end
         end)
     end,
