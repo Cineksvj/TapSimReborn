@@ -1,17 +1,19 @@
--- ══════════════════ CORVUS HUB — by Dastan (Golden Machine fixed) ══════════════════
+-- ══════════════════ CORVUS HUB — by Dastan ══════════════════
+-- Auto Tap | Auto Equip Best (Clicks) | Auto Open Void egg (x8, no animation) | Auto Gold (hatch pause -> craft all -> back)
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local CollectionService = game:GetService("CollectionService")
 local LocalPlayer = Players.LocalPlayer
 
 local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-
 local Window = Rayfield:CreateWindow({
     Name = "Corvus Hub",
     LoadingTitle = "Loading...",
     LoadingSubtitle = "by Dastan",
     ConfigurationSaving = { Enabled = false },
 })
+local Main = Window:CreateTab("Main", 4483362458)
 
 local function WaitForPath(names, timeout)
     local obj = ReplicatedStorage
@@ -22,73 +24,43 @@ local function WaitForPath(names, timeout)
     return obj
 end
 
-local TapEvent     = WaitForPath({"RemoteServices", "TapService", "RE", "TapRequested"})
-local PetEvent     = WaitForPath({"RemoteServices", "PetService", "RE", "PetActionRequested"})
-local EggEvent     = WaitForPath({"RemoteServices", "EggService", "RE", "EggHatchRequested"})
-local CollectionService = game:GetService("CollectionService")
-local MachineEvent = WaitForPath({"RemoteServices", "MachineService", "RE", "MachineCraftRequested"})
+local TapEvent           = WaitForPath({"RemoteServices", "TapService", "RE", "TapRequested"})
+local PetEvent           = WaitForPath({"RemoteServices", "PetService", "RE", "PetActionRequested"})
+local EggEvent           = WaitForPath({"RemoteServices", "EggService", "RE", "EggHatchRequested"})
+local MachineEvent       = WaitForPath({"RemoteServices", "MachineService", "RE", "MachineCraftRequested"})
 local MachineResultEvent = WaitForPath({"RemoteServices", "MachineService", "RE", "MachineCraftResult"})
 
-local function IsUuid(s)
-    return type(s) == "string" and #s == 36
-        and s:match("^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$") ~= nil
+local function GetHrp()
+    local c = LocalPlayer.Character
+    return c and c:FindFirstChild("HumanoidRootPart")
 end
 
--- ══════════════════ JEDEN TAB ══════════════════
-local Main = Window:CreateTab("Main", 4483362458)
-
--- ═══════════ TAP ═══════════
-Main:CreateSection("Tap")
-
-local TapRunning, TapConn = false, nil
-
+-- ═══════════ AUTO TAP ═══════════
+local TapConn
 Main:CreateToggle({
-    Name = "Auto Tap (0 delay)",
+    Name = "Auto Tap",
     CurrentValue = false,
-    Flag = "AutoTap",
     Callback = function(Value)
-        TapRunning = Value
-        if TapRunning then
-            if not TapEvent then warn("[Tap] Remote nie znaleziony") return end
+        if TapConn then TapConn:Disconnect() TapConn = nil end
+        if Value and TapEvent then
             TapConn = RunService.Heartbeat:Connect(function()
-                if TapRunning then
-                    TapEvent:FireServer({ Auto = false, ClientSequence = 1 })
-                end
+                TapEvent:FireServer({ Auto = false, ClientSequence = 1 })
             end)
-        elseif TapConn then
-            TapConn:Disconnect(); TapConn = nil
         end
     end,
 })
 
--- ═══════════ PETS ═══════════
-Main:CreateSection("Pets")
-
-local PetModes = { "Clicks", "Rebirths", "Gems" }
-local SelectedMode = "Clicks"
-local PetRunning = false
-
-Main:CreateDropdown({
-    Name = "Equip Best Mode",
-    Options = PetModes,
-    CurrentOption = { SelectedMode },
-    MultipleOptions = false,
-    Flag = "PetMode",
-    Callback = function(Option)
-        SelectedMode = Option[1]
-    end,
-})
-
+-- ═══════════ AUTO EQUIP BEST (Clicks) ═══════════
+local EquipOn = false
 Main:CreateToggle({
-    Name = "Auto Equip Best (1s)",
+    Name = "Auto Equip Best",
     CurrentValue = false,
-    Flag = "AutoPet",
     Callback = function(Value)
-        PetRunning = Value
-        if PetRunning and PetEvent then
+        EquipOn = Value
+        if Value and PetEvent then
             task.spawn(function()
-                while PetRunning do
-                    PetEvent:FireServer({ Action = "EquipBest", Mode = SelectedMode })
+                while EquipOn do
+                    PetEvent:FireServer({ Action = "EquipBest", Mode = "Clicks" })
                     task.wait(1)
                 end
             end)
@@ -96,454 +68,195 @@ Main:CreateToggle({
     end,
 })
 
--- ═══════════ EGGS ═══════════
-Main:CreateSection("Eggs")
-
-local BURST_PER_FRAME = 5
-
-local function GetEggOptions()
-    local names, seen = {}, {}
-    local function add(n)
-        if type(n) == "string" and #n > 0 and not seen[n] then
-            seen[n] = true
-            table.insert(names, n)
-        end
+-- ═══════════ PET DATA ═══════════
+-- Data.Pets.Owned[uid] = { Name, Tier, Locked, Frozen }, Data.Pets.Equipped = { uid }, Data.Pets.StorageLimit = max pets
+local DataController
+local function GetData()
+    if not DataController then
+        local ok, dc = pcall(function() return require(ReplicatedStorage.Controllers.Core.DataController) end)
+        if not ok or type(dc) ~= "table" then return nil end
+        DataController = dc
     end
-    local module = WaitForPath({"Shared", "Pets", "LaunchEggConfig"}, 5)
-    if module then
-        local ok, cfg = pcall(require, module)
-        if ok and type(cfg) == "table" then
-            local roots = { cfg }
-            if type(cfg.Eggs) == "table" then table.insert(roots, cfg.Eggs) end
-            if type(cfg.GetEggs) == "function" then
-                local ok2, res = pcall(cfg.GetEggs)
-                if ok2 and type(res) == "table" then table.insert(roots, res) end
-            end
-            for _, root in ipairs(roots) do
-                for k, v in pairs(root) do
-                    if type(k) == "string" and type(v) == "table"
-                        and (v.Price ~= nil or v.Cost ~= nil or v.Pets ~= nil
-                            or v.Weight ~= nil or v.Weights ~= nil
-                            or v.Currency ~= nil or v.Order ~= nil) then
-                        add(k)
-                    end
-                end
-                for _, v in ipairs(root) do
-                    if type(v) == "table" and type(v.Name) == "string" then
-                        add(v.Name)
-                    end
-                end
-            end
-            if #names == 0 then
-                for _, root in ipairs(roots) do
-                    for k, v in pairs(root) do
-                        if type(k) == "string" and type(v) == "table" then add(k) end
-                    end
-                end
-            end
-        end
+    local ok, rep = pcall(function() return DataController:GetReplica() end)
+    if ok and type(rep) == "table" and type(rep.Data) == "table" and type(rep.Data.Pets) == "table" then
+        return rep.Data
     end
-    add("Crystal")
-    table.sort(names)
-    return names
 end
 
-local EggOptions = GetEggOptions()
-local DefaultEgg = table.find(EggOptions, "Crystal") and "Crystal" or EggOptions[1]
-local SelectedEgg, CustomEgg = DefaultEgg, ""
-local HatchCount = 8 -- 8x gamepass
-local Seq = 0
-local LastClientSeq, InOwnHatch = 0, false -- Seq is a running counter of the game's own hatch requests: we continue it instead of restarting at 1
-local EggRunning, EggConn = false, nil
-
-local function CurrentEgg()
-    if CustomEgg ~= "" then return CustomEgg end
-    return SelectedEgg
+local function Storage()
+    local data = GetData()
+    if not (data and type(data.Pets.Owned) == "table") then return nil end
+    local n = 0
+    for _ in pairs(data.Pets.Owned) do n += 1 end
+    return n, tonumber(data.Pets.StorageLimit) or 150
 end
+
+-- ═══════════ AUTO OPEN VOID EGG (x8, no animation) ═══════════
+local EGG, COUNT, BURST = "Void", 8, 5
+local Seq, LastClientSeq, InOwnHatch = 0, 0, false
+local EggWanted, EggPaused, EggConn = false, false, nil
 
 local function FireHatch()
-    if LastClientSeq > Seq then Seq = LastClientSeq end -- the hook below learns the game's current counter
+    if LastClientSeq > Seq then Seq = LastClientSeq end -- continue the game's own counter
     Seq += 1
     InOwnHatch = true
-    EggEvent:FireServer({
-        Egg = CurrentEgg(),
-        Auto = false,
-        Count = HatchCount,
-        Seq = Seq,
-    })
+    EggEvent:FireServer({ Egg = EGG, Auto = false, Count = COUNT, Seq = Seq })
     InOwnHatch = false
 end
 
-Main:CreateDropdown({
-    Name = "Egg",
-    Options = EggOptions,
-    CurrentOption = { DefaultEgg },
-    MultipleOptions = false,
-    Flag = "EggSelect",
-    Callback = function(Option)
-        SelectedEgg = Option[1] or DefaultEgg
-    end,
-})
-
-Main:CreateInput({
-    Name = "Custom egg name (nadpisuje dropdown)",
-    PlaceholderText = "empty = use dropdown",
-    CurrentValue = "",
-    Flag = "EggCustom",
-    Callback = function(Text)
-        CustomEgg = Text
-    end,
-})
-
-Main:CreateDropdown({
-    Name = "Hatches per request (Count)",
-    Options = { "1", "3", "8" },
-    CurrentOption = { "8" },
-    MultipleOptions = false,
-    Flag = "EggCount",
-    Callback = function(Option)
-        HatchCount = tonumber(Option[1]) or 8
-    end,
-})
-
--- ═══ NO ANIMATION (SAFE — tylko GUI, zero blokowania eventów) ═══
-local SkipAnim = false
-local GuiWatch = nil
-
-local function IsHatchGui(obj)
-    if not obj:IsA("ScreenGui") then return false end
-    local n = string.lower(obj.Name)
-    return string.find(n, "hatch") or string.find(n, "reveal") or string.find(n, "opening")
-end
-
-local function KillExistingHatchGuis()
-    local pg = LocalPlayer:FindFirstChild("PlayerGui")
-    if not pg then return end
-    for _, child in ipairs(pg:GetChildren()) do
-        if IsHatchGui(child) then
-            pcall(function() child:Destroy() end)
-        end
-    end
-end
-
-Main:CreateToggle({
-    Name = "No hatch animation (safe)",
-    CurrentValue = false,
-    Flag = "EggNoAnim",
-    Callback = function(Value)
-        SkipAnim = Value
-        if Value then
-            KillExistingHatchGuis()
-            GuiWatch = LocalPlayer.PlayerGui.ChildAdded:Connect(function(child)
-                if SkipAnim and IsHatchGui(child) then
-                    pcall(function() child:Destroy() end)
-                end
-            end)
-        else
-            if GuiWatch then GuiWatch:Disconnect() GuiWatch = nil end
-        end
-    end,
-})
-
-local function StartEgg()
-    if EggRunning or not EggEvent then return end
-    EggRunning = true
-    EggConn = RunService.Heartbeat:Connect(function()
-        if EggRunning then
-            for _ = 1, BURST_PER_FRAME do
-                FireHatch()
-            end
-        end
-    end)
-end
-
-local function StopEgg()
-    EggRunning = false
-    if EggConn then EggConn:Disconnect(); EggConn = nil end
-end
-
-Main:CreateToggle({
-    Name = "Auto Open (extra fast)",
-    CurrentValue = false,
-    Flag = "AutoEgg",
-    Callback = function(Value)
-        if Value then
-            if not EggEvent then warn("[Eggs] Remote nie znaleziony") return end
-            StartEgg()
-        else
-            StopEgg()
-        end
-    end,
-})
-
-Main:CreateButton({
-    Name = "Hatch x100 (burst)",
-    Callback = function()
-        if not EggEvent then warn("[Eggs] Remote nie znaleziony") return end
-        task.spawn(function()
-            for _ = 1, 100 do
-                FireHatch()
-                task.wait()
-            end
-        end)
-    end,
-})
-
-
--- hook: learn the game's own hatch counter (Seq) so our requests continue it
+-- learn the game's hatch counter so the server does not drop our requests as old ones
 pcall(function()
     if not (EggEvent and hookmetamethod and getnamecallmethod) then return end
     local wrap = newcclosure or function(f) return f end
     local old
     old = hookmetamethod(game, "__namecall", wrap(function(self, ...)
-        if self == EggEvent and getnamecallmethod() == "FireServer" then
+        if self == EggEvent and getnamecallmethod() == "FireServer" and not InOwnHatch then
             local args = ...
-            if not InOwnHatch and type(args) == "table" and type(args.Seq) == "number" and args.Seq > LastClientSeq then
+            if type(args) == "table" and type(args.Seq) == "number" and args.Seq > LastClientSeq then
                 LastClientSeq = args.Seq
             end
         end
         return old(self, ...)
     end))
 end)
--- ═══════════ PET DATA / STORAGE ═══════════
--- Real layout (from the game's own code): Data.Pets.Owned[uid] = { Name, Tier, Locked, Frozen, ... },
--- Data.Pets.Equipped = { uid, ... }, Data.Pets.StorageLimit = max pets. A hatch needs `Count` free slots (else "StorageFull").
-local function Ser(v, depth)
-    depth = depth or 0
-    if type(v) ~= "table" then return tostring(v) end
-    if depth >= 2 then return "{...}" end
-    local out = {}
-    for k, x in pairs(v) do
-        out[#out + 1] = tostring(k) .. "=" .. Ser(x, depth + 1)
-        if #out >= 14 then out[#out + 1] = "..." break end
-    end
-    return "{" .. table.concat(out, ", ") .. "}"
-end
 
-local DataControllerModule = nil
-local function GetData()
-    if not DataControllerModule then
-        local ok, dc = pcall(function() return require(ReplicatedStorage.Controllers.Core.DataController) end)
-        if not ok or type(dc) ~= "table" then return nil end
-        DataControllerModule = dc
-    end
-    local ok, rep = pcall(function() return DataControllerModule:GetReplica() end)
-    if ok and type(rep) == "table" and type(rep.Data) == "table" and type(rep.Data.Pets) == "table" then
-        return rep.Data
-    end
-    return nil
+-- hatch animation: destroy the hatch screens while the egg toggle is on
+local function IsHatchGui(obj)
+    if not obj:IsA("ScreenGui") then return false end
+    local n = string.lower(obj.Name)
+    return string.find(n, "hatch") or string.find(n, "reveal") or string.find(n, "opening")
 end
+pcall(function()
+    local pg = LocalPlayer:WaitForChild("PlayerGui")
+    pg.ChildAdded:Connect(function(child)
+        if EggWanted and IsHatchGui(child) then pcall(function() child:Destroy() end) end
+    end)
+end)
 
--- returns owned count, storage limit
-local function Storage()
+Main:CreateToggle({
+    Name = "Auto Open Void Egg",
+    CurrentValue = false,
+    Callback = function(Value)
+        EggWanted = Value
+        if EggConn then EggConn:Disconnect() EggConn = nil end
+        if not Value then return end
+        if not EggEvent then warn("[Egg] remote not found") return end
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        if pg then
+            for _, g in ipairs(pg:GetChildren()) do
+                if IsHatchGui(g) then pcall(function() g:Destroy() end) end
+            end
+        end
+        EggConn = RunService.Heartbeat:Connect(function()
+            if EggWanted and not EggPaused then
+                for _ = 1, BURST do FireHatch() end
+            end
+        end)
+    end,
+})
+
+-- ═══════════ AUTO GOLD ═══════════
+-- Storage nearly full (fewer free slots than one x8 hatch needs) -> pause the egg, go to the Golden machine circle,
+-- craft EVERY set of 6 same pets, go back to where you were, resume the egg. Repeats forever.
+local SOURCE_TIER, NEED = "Normal", 6
+
+local function GetGroups()
     local data = GetData()
-    if not data or type(data.Pets.Owned) ~= "table" then return nil end
-    local n = 0
-    for _ in pairs(data.Pets.Owned) do n += 1 end
-    return n, tonumber(data.Pets.StorageLimit) or 150
-end
-
--- ═══════════ MACHINES ═══════════
--- MachineCraftRequested:FireServer({ PetIds = { N x uuid }, Machine = "Golden", Action = "Craft" })
--- Golden: N same-name pets of tier "Normal" (N = #Chances = 6 for 100%). Diamond: Golden pets. The server wants you standing
--- INSIDE the machine's "InteractionPoint" part, so we teleport there, craft EVERYTHING that can be crafted and teleport back.
-Main:CreateSection("Machines")
-
-local MachineConfig = nil
-do
-    local mod = WaitForPath({"Shared", "Pets", "MachineConfig"}, 5)
-    if mod then
-        local ok, cfg = pcall(require, mod)
-        if ok and type(cfg) == "table" then MachineConfig = cfg end
-    end
-end
-
-local FallbackCfg = {
-    Golden = { SourceTier = "Normal", Chances = { 13, 32, 40, 63, 80, 100 } },
-    Diamond = { SourceTier = "Golden", Chances = { 20, 40, 60, 80, 100 } },
-}
-local function MachineCfg(machine)
-    local c = MachineConfig and MachineConfig[machine]
-    if type(c) == "table" and c.SourceTier and type(c.Chances) == "table" then return c end
-    return FallbackCfg[machine]
-end
-
-local MachineOptions = { "Golden", "Diamond" }
-local SelectedMachine = "Golden"
-
-local StatusLabel = Main:CreateLabel("Status: idle")
-local LastStatus = ""
-local function SetStatus(text)
-    if text == LastStatus then return end
-    LastStatus = text
-    pcall(function() StatusLabel:Set("Status: " .. text) end)
-end
-
-local function Notify(title, content)
-    pcall(function() Rayfield:Notify({ Title = title, Content = content, Duration = 5 }) end)
-end
-
-local function GetHrp()
-    local c = LocalPlayer.Character
-    return c and c:FindFirstChild("HumanoidRootPart")
-end
-
--- pets grouped by Name that this machine may use (right tier, not locked/frozen/equipped)
-local function GetGroups(machine)
-    local cfg = MachineCfg(machine)
-    local data = GetData()
-    if not (cfg and data and type(data.Pets.Owned) == "table") then return nil end
+    if not (data and type(data.Pets.Owned) == "table") then return nil end
     local equipped = {}
     for _, id in ipairs(data.Pets.Equipped or {}) do equipped[id] = true end
     local groups = {}
     for id, pet in pairs(data.Pets.Owned) do
-        if type(pet) == "table" and pet.Tier == cfg.SourceTier and pet.Locked ~= true and pet.Frozen == nil
+        if type(pet) == "table" and pet.Tier == SOURCE_TIER and pet.Locked ~= true and pet.Frozen == nil
             and not equipped[id] and type(pet.Name) == "string" then
             local g = groups[pet.Name]
             if not g then g = {} groups[pet.Name] = g end
             table.insert(g, id)
         end
     end
-    return groups, #cfg.Chances
+    return groups
 end
 
-local function CountSets(machine)
-    local groups, need = GetGroups(machine)
-    if not groups then return 0 end
+local function CountSets()
+    local groups = GetGroups()
     local sets = 0
-    for _, ids in pairs(groups) do sets += math.floor(#ids / need) end
+    for _, ids in pairs(groups or {}) do sets += math.floor(#ids / NEED) end
     return sets
 end
 
--- ── teleporting (machine point + the egg spot) ──
-local MachineSpots = {} -- manual fallback: [machine] = CFrame saved with the button
-local PointNames = { Golden = "Golden", Diamond = "Diamond" }
-
-local function MachineTarget(machine)
-    local want = PointNames[machine] or machine
-    local best, bestDist
+-- the circle you stand on to open the machine: a part tagged "InteractionPoint" named "Golden".
+-- We stand at the middle of it ON THE FLOOR (ray down from the middle), not at the middle of its box.
+local function MachineTarget()
     local hrp = GetHrp()
+    local best, bestDist
     for _, p in ipairs(CollectionService:GetTagged("InteractionPoint")) do
-        if p.Name == want and (p:IsA("BasePart") or p:IsA("Model")) then
-            local cf = p:IsA("BasePart") and p.CFrame or p:GetBoundingBox()
-            local d = hrp and (hrp.Position - cf.Position).Magnitude or 0
-            if not best or d < bestDist then best, bestDist = cf, d end
+        if p.Name == "Golden" then
+            local cf, size
+            if p:IsA("BasePart") then cf, size = p.CFrame, p.Size
+            elseif p:IsA("Model") then cf, size = p:GetBoundingBox() end
+            if cf then
+                local d = hrp and (hrp.Position - cf.Position).Magnitude or 0
+                if not bestDist or d < bestDist then best, bestDist = { cf = cf, size = size }, d end
+            end
         end
     end
-    if best then return best + Vector3.new(0, 1, 0) end
-    return MachineSpots[machine]
+    if not best then return nil end
+    local pos = best.cf.Position
+    local y = pos.Y - best.size.Y / 2 + 3 -- fallback: bottom of the zone
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = { LocalPlayer.Character }
+    local hit = workspace:Raycast(pos, Vector3.new(0, -(best.size.Y / 2 + 12), 0), params)
+    if hit then y = hit.Position.Y + 3 end
+    return Vector3.new(pos.X, y, pos.Z)
 end
 
-local function TeleportTo(cf, settle)
+local function TeleportTo(pos, settle)
     local hrp = GetHrp()
     if not hrp then return false end
     hrp.AssemblyLinearVelocity = Vector3.zero
-    hrp.CFrame = cf
-    task.wait(settle or 0.5) -- let the server see the new position
+    hrp.CFrame = CFrame.new(pos)
+    task.wait(settle or 0.5)
     return true
 end
 
-local function GoNearMachine(machine)
-    local target = MachineTarget(machine)
-    if not target then
-        return false, "machine point not found: stand on the " .. machine .. " machine and press 'Save machine spot'"
-    end
+local function GoToMachine()
+    local target = MachineTarget()
+    if not target then return false end
     local hrp = GetHrp()
-    if not hrp then return false, "no character" end
-    if (hrp.Position - target.Position).Magnitude > 3 then
-        TeleportTo(target, 0.6)
-    end
+    if not hrp then return false end
+    if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 0.6) end
     return true
 end
 
-local SavedEggSpot = nil
-Main:CreateButton({
-    Name = "Save egg spot (stand at the egg first)",
-    Callback = function()
-        local hrp = GetHrp()
-        if not hrp then return end
-        SavedEggSpot = hrp.CFrame
-        Notify("Egg spot saved", "The loop returns here after crafting")
-    end,
-})
-
-Main:CreateButton({
-    Name = "Save machine spot (fallback, stand on the machine first)",
-    Callback = function()
-        local hrp = GetHrp()
-        if not hrp then return end
-        MachineSpots[SelectedMachine] = hrp.CFrame
-        Notify("Machine spot saved", SelectedMachine)
-    end,
-})
-
--- ── hide the machine / craft GUI while we craft (the server does not need it; only the client draws it) ──
-local HideCraftGui = true
-local CraftGuiWords = { "machine", "golden", "craft", "diamond" }
-local HiddenGuis = {}
-local CraftGuiUntil = 0
-
-local function IsCraftGui(obj)
-    if not obj:IsA("ScreenGui") then return false end
-    local n = string.lower(obj.Name)
-    for _, w in ipairs(CraftGuiWords) do
-        if string.find(n, w, 1, true) then return true end
-    end
-    return false
+-- hide the crafting GUI/cutscene while we craft (client-only visuals)
+local HideUntil, Hidden = 0, {}
+local function IsCraftGui(g)
+    if not g:IsA("ScreenGui") then return false end
+    local n = string.lower(g.Name)
+    return string.find(n, "machine", 1, true) or string.find(n, "golden", 1, true) or string.find(n, "craft", 1, true)
 end
-
-local function HideGui(g)
-    if g.Enabled then
-        g.Enabled = false
-        HiddenGuis[g] = true
-    end
-end
-
-local function HideCraftGuisNow()
+local function HideCraftGuis()
+    HideUntil = os.clock() + 20
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
     for _, g in ipairs(pg:GetChildren()) do
-        if IsCraftGui(g) then pcall(HideGui, g) end
+        if IsCraftGui(g) and g.Enabled then g.Enabled = false Hidden[g] = true end
     end
 end
-
-local function RestoreCraftGuis()
-    CraftGuiUntil = 0
-    for g in pairs(HiddenGuis) do
-        pcall(function() if g.Parent then g.Enabled = true end end)
-    end
-    HiddenGuis = {}
+local function RestoreGuis()
+    HideUntil = 0
+    for g in pairs(Hidden) do pcall(function() if g.Parent then g.Enabled = true end end) end
+    Hidden = {}
 end
-
 pcall(function()
     LocalPlayer:WaitForChild("PlayerGui").ChildAdded:Connect(function(child)
-        if HideCraftGui and os.clock() < CraftGuiUntil and IsCraftGui(child) then
-            task.defer(function() pcall(HideGui, child) end)
+        if os.clock() < HideUntil and IsCraftGui(child) then
+            task.defer(function() pcall(function() child.Enabled = false Hidden[child] = true end) end)
         end
     end)
 end)
 
--- the client-side machine stage (3D "put pets in" scene): no-op while we craft (best effort)
-pcall(function()
-    local mod = ReplicatedStorage:FindFirstChild("Modules")
-    mod = mod and mod:FindFirstChild("Client")
-    mod = mod and mod:FindFirstChild("Pets")
-    mod = mod and mod:FindFirstChild("GoldenMachineStage")
-    if not mod then return end
-    local stage = require(mod)
-    if type(stage) ~= "table" or table.isfrozen(stage) then return end
-    for name, fn in pairs(stage) do
-        local ln = string.lower(tostring(name))
-        if type(fn) == "function" and (string.find(ln, "play") or string.find(ln, "show") or string.find(ln, "start")) then
-            stage[name] = function(...)
-                if HideCraftGui and os.clock() < CraftGuiUntil then return nil end
-                return fn(...)
-            end
-        end
-    end
-end)
-
--- ── craft result from the server ──
 local ResultSeq, LastResult = 0, nil
 if MachineResultEvent then
     MachineResultEvent.OnClientEvent:Connect(function(r)
@@ -554,297 +267,94 @@ if MachineResultEvent then
     end)
 end
 
-local CraftGap = 0.35 -- seconds between crafts (the server answers each one; raise it if you get rate limited)
-
--- one craft. returns "ok" | "none" (no complete set) | "fail", info
-local function CraftOnce(machine)
-    local groups, need = GetGroups(machine)
+-- one craft: "ok" | "none" (no complete set) | "fail", reason
+local function CraftOnce()
+    local groups = GetGroups()
     if not groups then return "fail", "pet data not ready" end
-    local bestIds
+    local best
     for _, ids in pairs(groups) do
-        if #ids >= need and (not bestIds or #ids > #bestIds) then bestIds = ids end
+        if #ids >= NEED and (not best or #ids > #best) then best = ids end
     end
-    if not bestIds then return "none" end
+    if not best then return "none" end
     local use = {}
-    for i = 1, need do use[i] = bestIds[i] end
-
-    if HideCraftGui then
-        CraftGuiUntil = os.clock() + 20
-        HideCraftGuisNow()
-    end
+    for i = 1, NEED do use[i] = best[i] end
+    HideCraftGuis()
     local seq0 = ResultSeq
-    local okFire, err = pcall(function()
-        MachineEvent:FireServer({ PetIds = use, Machine = machine, Action = "Craft" })
+    local ok, err = pcall(function()
+        MachineEvent:FireServer({ PetIds = use, Machine = "Golden", Action = "Craft" })
     end)
-    if not okFire then return "fail", "FireServer error: " .. tostring(err) end
-
+    if not ok then return "fail", tostring(err) end
     local t0 = os.clock()
-    while os.clock() - t0 < 6 do
-        if ResultSeq > seq0 then break end
+    while os.clock() - t0 < 6 and ResultSeq == seq0 do
         local data = GetData()
-        if data and data.Pets.Owned[use[1]] == nil then break end -- pets consumed, result event may lag
+        if data and data.Pets.Owned[use[1]] == nil then return "ok" end -- consumed, result may lag
         task.wait(0.05)
     end
     if ResultSeq > seq0 then
-        local r = LastResult
-        if r.Success == true then return "ok", r end
-        return "fail", tostring(r.Error or r.Message or r.Reason or Ser(r))
+        if LastResult.Success == true then return "ok" end
+        return "fail", tostring(LastResult.Error or LastResult.Message or LastResult.Reason or "refused")
     end
-    local data = GetData()
-    if data and data.Pets.Owned[use[1]] == nil then return "ok" end
-    return "fail", "no answer from the server (too far from the machine?)"
+    return "fail", "no answer from the server"
 end
 
--- teleports to the machine, crafts every complete set, returns crafted count, last error
-local function CraftAll(machine, alive)
-    local crafted, fails, lastErr = 0, 0, nil
-    local okNear, why = GoNearMachine(machine)
-    if not okNear then return 0, why end
-    while alive() do
-        local status, info = CraftOnce(machine)
+local function CraftAll()
+    if not GoToMachine() then warn("[Gold] machine circle not found") return 0 end
+    local crafted, fails = 0, 0
+    while true do
+        local status, why = CraftOnce()
         if status == "ok" then
             crafted += 1
             fails = 0
-            SetStatus(string.format("crafting %s: %d done, %d sets left", machine, crafted, CountSets(machine)))
-            task.wait(CraftGap)
+            task.wait(0.35)
         elseif status == "none" then
             break
         else
             fails += 1
-            lastErr = info
-            warn("[Craft] " .. tostring(info))
+            warn("[Gold] " .. tostring(why))
             if fails >= 4 then break end
             task.wait(math.min(0.5 * 2 ^ (fails - 1), 4))
-            GoNearMachine(machine) -- maybe we were pushed away, re-check the position
+            GoToMachine() -- maybe pushed off the circle
         end
     end
-    return crafted, lastErr
+    return crafted
 end
 
-Main:CreateDropdown({
-    Name = "Machine",
-    Options = MachineOptions,
-    CurrentOption = { "Golden" },
-    MultipleOptions = false,
-    Flag = "MachineSelect",
-    Callback = function(Option)
-        SelectedMachine = Option[1] or "Golden"
-    end,
-})
-
+local GoldToken = 0
 Main:CreateToggle({
-    Name = "Hide the machine GUI while crafting",
-    CurrentValue = true,
-    Flag = "CraftHideGui",
+    Name = "Auto Gold",
+    CurrentValue = false,
     Callback = function(Value)
-        HideCraftGui = Value
-        if not Value then RestoreCraftGuis() end
-    end,
-})
-
-local ManualBusy = false
-Main:CreateButton({
-    Name = "Craft all now (and come back)",
-    Callback = function()
-        if ManualBusy then return end
-        if not MachineEvent then warn("[Craft] Remote nie znaleziony") return end
-        ManualBusy = true
+        GoldToken += 1
+        local my = GoldToken
+        if not Value then
+            EggPaused = false
+            RestoreGuis()
+            return
+        end
+        if not MachineEvent then warn("[Gold] remote not found") return end
         task.spawn(function()
-            local hrp0 = GetHrp()
-            local origin = hrp0 and hrp0.CFrame
-            local n, why = CraftAll(SelectedMachine, function() return true end)
-            if origin then TeleportTo(origin, 0.2) end
-            RestoreCraftGuis()
-            ManualBusy = false
-            if n > 0 then SetStatus("crafted " .. n .. " x " .. SelectedMachine)
-            else SetStatus("nothing crafted: " .. tostring(why or "no complete set")) end
-        end)
-    end,
-})
-
--- ═══════════ EGG + GOLD LOOP ═══════════
--- Open eggs -> storage has fewer free slots than one hatch needs -> stop, teleport to the machine, craft ALL sets,
--- teleport back to the egg, keep opening. Repeats forever. Stops (with a notification) only if the storage is full
--- and there is nothing left to craft, so it can never ping-pong without progress.
-local GoldThreshold = 0.9
-
-Main:CreateDropdown({
-    Name = "Gold-only mode starts at (inventory %)",
-    Options = { "70%", "80%", "90%", "95%" },
-    CurrentOption = { "90%" },
-    MultipleOptions = false,
-    Flag = "GoldThreshold",
-    Callback = function(Option)
-        GoldThreshold = (tonumber(string.match(Option[1] or "90%", "%d+")) or 90) / 100
-    end,
-})
-
-local InvLabel = Main:CreateLabel("Inventory: unknown")
-local function SetInv(text) pcall(function() InvLabel:Set(text) end) end
-
-Main:CreateButton({
-    Name = "Check inventory",
-    Callback = function()
-        local n, limit = Storage()
-        if not n then SetInv("Inventory: data not ready") return end
-        SetInv(string.format("Inventory: %d/%d (%d free) | craftable sets: %d", n, limit, limit - n, CountSets(SelectedMachine)))
-    end,
-})
-
-local LoopToken = 0
-local LoopToggle, GoldToggle
-
-local function RunLoop(manageEgg, toggle)
-    LoopToken += 1
-    local myToken = LoopToken
-    local function alive() return myToken == LoopToken end
-    local function stopSelf(reason)
-        if reason then Notify("Stopped", reason) SetStatus(reason) end
-        if alive() then LoopToken += 1 end
-        pcall(function() toggle:Set(false) end)
-    end
-
-    task.spawn(function()
-        local hrp0 = GetHrp()
-        local home = SavedEggSpot or (hrp0 and hrp0.CFrame)
-        while alive() do
-            local n, limit = Storage()
-            if not n then
-                SetStatus("waiting for pet data")
-                task.wait(1)
-            else
-                local free = limit - n
-                SetInv(string.format("Inventory: %d/%d (%d free)", n, limit, free))
-                local needCraft
-                if manageEgg then needCraft = free < HatchCount
-                else needCraft = (n / limit) >= GoldThreshold end
-
-                if not needCraft then
-                    if manageEgg then
-                        local hrp = GetHrp()
-                        if home and hrp and (hrp.Position - home.Position).Magnitude > 12 then
-                            TeleportTo(home, 0.3)
-                        end
-                        StartEgg()
-                        SetStatus(string.format("opening eggs (%d/%d)", n, limit))
+            while my == GoldToken do
+                local n, limit = Storage()
+                if n and limit - n < COUNT then
+                    EggPaused = true
+                    task.wait(1.2) -- let hatches in flight land
+                    local hrp = GetHrp()
+                    local home = hrp and hrp.Position
+                    local crafted = CraftAll()
+                    if home and my == GoldToken then TeleportTo(home + Vector3.new(0, 1, 0), 0.4) end
+                    RestoreGuis()
+                    local n2, limit2 = Storage()
+                    if crafted == 0 or (n2 and limit2 - n2 < COUNT) then
+                        task.wait(2) -- nothing to craft / still full: stay paused, re-check
                     else
-                        SetStatus(string.format("waiting for %d%% (now %d%%)", GoldThreshold * 100, math.floor(n / limit * 100)))
+                        EggPaused = false
                     end
-                    task.wait(manageEgg and 0.15 or 1.5)
                 else
-                    if manageEgg then StopEgg() task.wait(1.2) end -- let the hatches in flight land first
-                    if CountSets(SelectedMachine) == 0 then
-                        if manageEgg then
-                            stopSelf("Storage full and nothing to craft")
-                            break
-                        end
-                        SetStatus("full but no complete set to craft")
-                        task.wait(3)
-                    else
-                        SetStatus("storage full: crafting")
-                        local crafted, why = CraftAll(SelectedMachine, alive)
-                        if home and alive() then TeleportTo(home, 0.4) end
-                        if crafted == 0 and alive() then
-                            stopSelf("Craft failed: " .. tostring(why))
-                            break
-                        end
-                    end
+                    EggPaused = false
+                    task.wait(0.15)
                 end
             end
-        end
-        if manageEgg then StopEgg() end
-        RestoreCraftGuis()
-    end)
-end
-
-LoopToggle = Main:CreateToggle({
-    Name = "Egg + Gold loop (open eggs, craft when full, return)",
-    CurrentValue = false,
-    Flag = "EggGoldLoop",
-    Callback = function(Value)
-        if not Value then
-            LoopToken += 1
-            StopEgg()
-            RestoreCraftGuis()
-            SetStatus("idle")
-            return
-        end
-        if not (MachineEvent and EggEvent) then warn("[Loop] Remote nie znaleziony") return end
-        RunLoop(true, LoopToggle)
-    end,
-})
-
-GoldToggle = Main:CreateToggle({
-    Name = "Gold only (craft at threshold, you open eggs yourself)",
-    CurrentValue = false,
-    Flag = "AutoGold",
-    Callback = function(Value)
-        if not Value then
-            LoopToken += 1
-            RestoreCraftGuis()
-            SetStatus("idle")
-            return
-        end
-        if not MachineEvent then warn("[Gold] Remote nie znaleziony") return end
-        RunLoop(false, GoldToggle)
-    end,
-})
-
--- ═══════════ EGG SPEED ═══════════
--- Seq continues the game's own counter (learned by the hook) so the server does not drop our requests as old ones.
--- Count stays at the 8 you own (a bigger Count would bypass the paid x8 gamepass, so it is not used).
--- Auto-tune: with Auto Open ON it tries 1,2,3,5,8,12,20 requests per frame, measures how many pets you really gain per second
--- and keeps the best level (the server has its own limit, more is not always faster).
-local TuneRunning = false
-Main:CreateToggle({
-    Name = "Auto-tune egg open speed (turn on Auto Open first)",
-    CurrentValue = false,
-    Flag = "EggTune",
-    Callback = function(Value)
-        TuneRunning = Value
-        if not Value then return end
-        task.spawn(function()
-            local levels = { 1, 2, 3, 5, 8, 12, 20 }
-            while TuneRunning do
-                local bestRate, bestLevel = -1, BURST_PER_FRAME
-                for _, lv in ipairs(levels) do
-                    if not TuneRunning then break end
-                    BURST_PER_FRAME = lv
-                    local n0 = Storage()
-                    task.wait(5)
-                    local n1 = Storage()
-                    local rate = (n0 and n1) and (n1 - n0) / 5 or 0
-                    print(string.format("[Tune] burst %d -> %.1f pets/s", lv, rate))
-                    if rate > bestRate * 1.05 then bestRate, bestLevel = rate, lv end
-                end
-                BURST_PER_FRAME = bestLevel
-                SetInv(string.format("Egg open speed: best burst %d (%.1f pets/s)", bestLevel, bestRate))
-                for _ = 1, 60 do
-                    if not TuneRunning then break end
-                    task.wait(1)
-                end
-            end
-        end)
-    end,
-})
-
-Main:CreateButton({
-    Name = "Dump pet data (debug, copy the console output)",
-    Callback = function()
-        task.spawn(function()
-            local n, limit = Storage()
-            print("[Craft/debug] storage:", n, "/", limit, "| machine remote:", MachineEvent and MachineEvent:GetFullName() or "nil")
-            print("[Craft/debug] machine point found:", MachineTarget(SelectedMachine) ~= nil)
-            local groups, need = GetGroups(SelectedMachine)
-            if not groups then print("[Craft/debug] pet data not ready") return end
-            local list = {}
-            for name, ids in pairs(groups) do list[#list + 1] = { name, #ids } end
-            table.sort(list, function(a, b) return a[2] > b[2] end)
-            print("[Craft/debug] need per craft:", need, "| craftable sets:", CountSets(SelectedMachine))
-            for i = 1, math.min(8, #list) do
-                print(string.format("[Craft/debug] group %d: %s x%d", i, list[i][1], list[i][2]))
-            end
-            if LastResult then print("[Craft/debug] last result:", Ser(LastResult)) end
+            EggPaused = false
         end)
     end,
 })
