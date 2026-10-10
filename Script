@@ -126,25 +126,21 @@ local SoundService = game:GetService("SoundService")
 local SR = 22050
 -- soft, round sounds: gentle attacks, low pitches, quiet
 local function env(t, attack, decay) return math.min(t / attack, 1) * math.exp(-t * decay) end
+-- "thock" family: low, short, soft. Nothing high-pitched, nothing that rings.
 local SYNTH = {
-    click = { 0.12, function(t) local f = 420 + 260 * math.exp(-t * 40) return math.sin(2 * math.pi * f * t) * env(t, 0.004, 28) * 0.32 end },
-    hover = { 0.06, function(t) return math.sin(2 * math.pi * 1500 * t) * env(t, 0.006, 70) * 0.06 end },
-    tick = { 0.04, function(t) return math.sin(2 * math.pi * 1900 * t) * env(t, 0.003, 110) * 0.12 end },
-    toggle = { 0.16, function(t)
-        local a = math.sin(2 * math.pi * 620 * t) * env(t, 0.004, 40)
-        local t2 = t - 0.06
-        local b = t2 > 0 and math.sin(2 * math.pi * 930 * t2) * env(t2, 0.004, 40) or 0
-        return (a + b) * 0.26
+    click = { 0.09, function(t) local f = 230 + 90 * math.exp(-t * 60) return (math.sin(2 * math.pi * f * t) + (math.random() * 2 - 1) * 0.08 * math.exp(-t * 300)) * env(t, 0.002, 45) * 0.3 end },
+    hover = { 0.05, function(t) return math.sin(2 * math.pi * 520 * t) * env(t, 0.006, 90) * 0.035 end },
+    tick = { 0.03, function(t) return math.sin(2 * math.pi * 640 * t) * env(t, 0.002, 160) * 0.07 end },
+    toggle = { 0.11, function(t) local f = 460 - 160 * (t / 0.11) return math.sin(2 * math.pi * f * t) * env(t, 0.003, 38) * 0.24 end },
+    open = { 0.14, function(t) local f = 200 + 180 * (t / 0.14) return math.sin(2 * math.pi * f * t) * math.sin(math.pi * t / 0.14) ^ 1.3 * 0.18 end },
+    close = { 0.14, function(t) local f = 380 - 180 * (t / 0.14) return math.sin(2 * math.pi * f * t) * math.sin(math.pi * t / 0.14) ^ 1.3 * 0.16 end },
+    notify = { 0.42, function(t)
+        local a = math.sin(2 * math.pi * 523 * t) * env(t, 0.01, 9)
+        local t2 = t - 0.1
+        local b = t2 > 0 and math.sin(2 * math.pi * 659 * t2) * env(t2, 0.01, 9) or 0
+        return (a + b) * 0.14
     end },
-    open = { 0.2, function(t) local f = 300 + 500 * (t / 0.2) return math.sin(2 * math.pi * f * t) * math.sin(math.pi * t / 0.2) ^ 1.5 * 0.2 end },
-    close = { 0.18, function(t) local f = 780 - 420 * (t / 0.18) return math.sin(2 * math.pi * f * t) * math.sin(math.pi * t / 0.18) ^ 1.5 * 0.18 end },
-    notify = { 0.55, function(t)
-        local a = (math.sin(2 * math.pi * 784 * t) + math.sin(2 * math.pi * 1568 * t) * 0.15) * env(t, 0.01, 7)
-        local t2 = t - 0.11
-        local b = t2 > 0 and (math.sin(2 * math.pi * 1047 * t2) + math.sin(2 * math.pi * 2093 * t2) * 0.15) * env(t2, 0.01, 7) or 0
-        return (a + b) * 0.16
-    end },
-    drag = { 0.12, function(t) local f = 260 + 120 * (t / 0.12) return math.sin(2 * math.pi * f * t) * math.sin(math.pi * t / 0.12) ^ 2 * 0.12 end },
+    drag = { 0.08, function(t) return math.sin(2 * math.pi * 260 * t) * math.sin(math.pi * t / 0.08) ^ 2 * 0.08 end },
 }
 local SoundIds, SoundPool = {}, {}
 local function RenderWav(def)
@@ -195,7 +191,7 @@ task.spawn(function()
     pcall(function() if makefolder and isfolder and not isfolder(Folder .. "/sounds") then makefolder(Folder .. "/sounds") end end)
     for name, def in pairs(SYNTH) do
         pcall(function()
-            local path = Folder .. "/sounds/" .. name .. "_v2.wav"
+            local path = Folder .. "/sounds/" .. name .. "_v3.wav"
             if not (isfile and isfile(path)) then writefile(path, RenderWav(def)) end
             SoundIds[name] = getcustomasset(path)
         end)
@@ -203,7 +199,7 @@ task.spawn(function()
     end
 end)
 local ConfigFile = Folder .. "/config.json"
-Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil, Sounds = true, Volume = 45, Anon = false, Scale = 100, MenuKey = "RightShift", FpsCap = 0, JoinAlerts = false }, Toggles = {} }
+Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil, Sounds = true, Volume = 40, Anon = false, Scale = 100, MenuKey = "RightShift", FpsCap = 0, JoinAlerts = false }, Toggles = {} }
 pcall(function()
     if isfile and readfile and isfile(ConfigFile) then
         local d = HttpService:JSONDecode(readfile(ConfigFile))
@@ -226,7 +222,7 @@ end
 T.Accent = (ACCENTS[Config.Data.Accent] or ACCENTS[1])[2]
 T.Glass = math.clamp((tonumber(Config.Data.Glass) or 35) / 100, 0, 0.75)
 SoundsOn = Config.Data.Sounds ~= false
-SoundVolume = tonumber(Config.Data.Volume) or 45
+SoundVolume = tonumber(Config.Data.Volume) or 40
 
 -- ─────────────────────────── root ───────────────────────────
 local AnonAvatar = "rbxassetid://16898613869" -- a plain user glyph from the icon sheet (rect set below)
@@ -342,7 +338,6 @@ task.spawn(function()
 end)
 H.Icon("chevron-right", 14, T.Sub, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), ZIndex = 4 }, Prof)
 H.Hover(Prof, 1, 0.965, "BackgroundTransparency")
-Prof.MouseEnter:Connect(function() Play("hover") end)
 Prof.MouseButton1Click:Connect(function() Play("click") H.Press(Prof) UI:Open("Settings") end)
 
 -- ─────────────────────────── header ───────────────────────────
@@ -535,7 +530,7 @@ function UI:Page(name, group, icon, desc)
             H.New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }, lbl)
             local right = H.Frame({ Size = UDim2.fromOffset(0, 28), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, LayoutOrder = 3, ZIndex = 5 }, inner)
             H.HList(right, 10, Enum.HorizontalAlignment.Right)
-            r.MouseEnter:Connect(function() H.Tween(hov, 0.14, { BackgroundTransparency = 0.965 }) lbl.TextColor3 = T.Text UI.Tip(r, desc) Play("hover") end)
+            r.MouseEnter:Connect(function() H.Tween(hov, 0.14, { BackgroundTransparency = 0.965 }) lbl.TextColor3 = T.Text UI.Tip(r, desc) end)
             r.MouseLeave:Connect(function() H.Tween(hov, 0.2, { BackgroundTransparency = 1 }) lbl.TextColor3 = T.Label UI.HideTip() end)
             table.insert(UI.Index, { Frame = r, Label = label or "", Text = string.lower((label or "") .. " " .. (desc or "")), Page = page, Desc = desc })
             return r, right, lbl
@@ -578,7 +573,7 @@ function UI:Page(name, group, icon, desc)
             if icon then H.Icon(icon, 15, T.Sub, { LayoutOrder = 1, ZIndex = 5 }, inner) end
             H.Text({ Text = text, Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, TextSize = 13, LayoutOrder = 2, ZIndex = 5 }, inner)
             H.Hover(b, T.Field, T.Hover)
-            b.MouseEnter:Connect(function() UI.Tip(b, desc) Play("hover") end)
+            b.MouseEnter:Connect(function() UI.Tip(b, desc) end)
             b.MouseLeave:Connect(UI.HideTip)
             b.MouseButton1Click:Connect(function() Play("click") H.Press(b) task.spawn(cb) end)
             table.insert(UI.Index, { Frame = wrap, Label = text, Text = string.lower(text .. " " .. (desc or "")), Page = page, Desc = desc })
@@ -606,7 +601,7 @@ function UI:Page(name, group, icon, desc)
                 if obj.Value == v then paint() return end
                 obj.Value = v
                 paint()
-                Play("toggle", v and 1.08 or 0.92)
+                Play("toggle", v and 1 or 0.82)
                 H.Tween(knob, 0.09, { Size = UDim2.fromOffset(20, 14) })
                 task.delay(0.09, function() H.Tween(knob, 0.24, { Size = UDim2.fromOffset(14, 14) }, Enum.EasingStyle.Back) end)
                 if not silent then task.spawn(cb, v) end
@@ -804,7 +799,7 @@ local function ShowSearch(q)
             H.Text({ Text = e.Label, Position = UDim2.fromOffset(46, 6), Size = UDim2.new(1, -80, 0, 18), TextSize = 13, TextColor3 = T.Text, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 42 }, b)
             H.Text({ Text = e.Page.Name .. (e.Desc and ("  ·  " .. e.Desc) or ""), Position = UDim2.fromOffset(46, 24), Size = UDim2.new(1, -80, 0, 16), TextSize = 11, TextColor3 = T.Dim, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 42 }, b)
             H.Icon("chevron-right", 14, T.Dim, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0), ZIndex = 42 }, b)
-            b.MouseEnter:Connect(function() H.Tween(b, 0.12, { BackgroundTransparency = 0.95 }) Play("hover") end)
+            b.MouseEnter:Connect(function() H.Tween(b, 0.12, { BackgroundTransparency = 0.95 }) end)
             b.MouseLeave:Connect(function() H.Tween(b, 0.14, { BackgroundTransparency = 1 }) end)
             b.MouseButton1Click:Connect(function() Play("click") ClosePop() SearchBox.Text = "" SearchBox:ReleaseFocus() UI:GoTo(e) end)
         end
@@ -1065,7 +1060,7 @@ local SetPriv = Settings:Section("Privacy", "Left")
 SetPriv:Toggle("Anonymous mode", Config.Data.Anon == true, function(v) Config.Data.Anon = v Config.Save() UI:ApplyAnon() end, "user", "Hides your name and avatar in the menu, above your head, in the player list and in the game's own texts")
 local SetSound = Settings:Section("Sounds", "Left")
 SetSound:Toggle("Menu sounds", Config.Data.Sounds ~= false, function(v) SoundsOn = v Config.Data.Sounds = v Config.Save() end, "activity")
-SetSound:Slider("Volume", 0, 100, Config.Data.Volume or 45, function(v) SoundVolume = v Config.Data.Volume = v Config.Save() Play("notify") end, "%", "activity")
+SetSound:Slider("Volume", 0, 100, Config.Data.Volume or 40, function(v) SoundVolume = v Config.Data.Volume = v Config.Save() Play("notify") end, "%", "activity")
 local SetTheme = Settings:Section("Appearance", "Right")
 SetTheme:Button("Next accent color", function() UI:SetAccent((Config.Data.Accent or 1) + 1) end, "palette")
 SetTheme:Slider("Transparency", 0, 75, Config.Data.Glass or 35, function(v) UI:SetGlass(v) end, "%", "layers")
