@@ -1117,13 +1117,30 @@ do
         CurrentValue = false,
         Callback = function(Value) DuckOn = Value end,
     })
+    -- The game's own LuckyDuckyController:CatchShown() clicks the duck on screen for real: it claims the reward,
+    -- plays the catch effects and removes the duck. A raw Claim left the duck waddling on screen.
+    local DuckController
+    pcall(function() DuckController = require(ReplicatedStorage.Controllers.Game.LuckyDuckyController) end)
     if spawnEv then
         spawnEv.OnClientEvent:Connect(function(d)
             if not DuckOn or type(d) ~= "table" or type(d.Id) ~= "string" then return end
-            task.wait(0.4) -- MinReaction 0.3 s
-            local r = Invoke(RF("LuckyDuckyService", "Claim"), d.Id)
-            if type(r) == "table" and r.Success then print("[Duck] " .. tostring(r.Reward or "caught"))
-            else warn("[Duck] " .. tostring(type(r) == "table" and r.Reason or r)) end
+            task.wait(0.45) -- MinReaction 0.3 s
+            local caught = false
+            if DuckController and type(DuckController.CatchShown) == "function" then
+                for _ = 1, 10 do -- the controller registers the duck a moment after the event
+                    local ok, res = pcall(DuckController.CatchShown, DuckController)
+                    if ok and res == true then caught = true break end
+                    task.wait(0.2)
+                end
+            end
+            if caught then
+                print("[Duck] caught via the game's catch")
+                Status("duck caught")
+            else
+                local r = Invoke(RF("LuckyDuckyService", "Claim"), d.Id)
+                if type(r) == "table" and r.Success then print("[Duck] " .. tostring(r.Reward or "caught"))
+                else warn("[Duck] " .. tostring(type(r) == "table" and r.Reason or r)) end
+            end
         end)
     end
 end
