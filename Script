@@ -855,6 +855,7 @@ function UI:SetAccent(i)
     T.Accent = ACCENTS[i][2]
     Config.Data.Accent = i Config.Save()
     for _, fn in ipairs(UI.AccentHooks) do pcall(fn, T.Accent) end
+    UI:Notify("Theme", ACCENTS[i][1] .. " accent", 2, "palette")
 end
 function UI:SetGlass(pct)
     T.Glass = math.clamp(pct / 100, 0, 0.75)
@@ -1441,7 +1442,10 @@ local function IsHatchGui(obj)
     local n = string.lower(obj.Name)
     -- never touch cutscene screens: destroying them leaves the game's ScreenHide hold active = whole UI gone
     if string.find(n, "secret") or string.find(n, "cutscene") or string.find(n, "layer") then return false end
-    return string.find(n, "hatch") or string.find(n, "reveal") or string.find(n, "opening")
+    -- "Hatching" is the game's own hatch HUD (Auto Open button, egg prompt): the egg controller keeps a reference to it
+    -- and errors forever when it is gone; the animation itself is off through the game's setting
+    if n == "hatching" then return false end
+    return string.find(n, "reveal") or string.find(n, "opening")
 end
 pcall(function()
     local pg = LocalPlayer:WaitForChild("PlayerGui")
