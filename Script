@@ -214,7 +214,7 @@ Main:CreateToggle({
         Pending, NextSendAt = {}, 0
         EggConn = RunService.Heartbeat:Connect(function()
             if Killed then EggConn:Disconnect() return end
-            if not EggWanted or EggHolds > 0 then return end
+            if not EggWanted or EggHolds > 0 or BusyBy ~= nil then return end
             local now = os.clock()
             if now < NextSendAt then return end
             local open = 0
@@ -496,8 +496,14 @@ local function GoTo(pointName)
         warn("[Craft] " .. pointName .. " machine circle not found on any unlocked island; skipping it for 5 min")
         return false
     end
-    if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 0.6) end
+    if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 1.2) end -- 1.2 s so the server sees the move
     return true
+end
+
+-- after "You must be near the ... Machine": stand on the circle again and give the server time
+local function ReGoTo(pointName)
+    local target = MachineTarget(pointName)
+    if target then TeleportTo(target + Vector3.new(0, 0.5, 0), 1.2) end
 end
 
 -- ── keep the crafting GUI closed while we craft ──
@@ -583,21 +589,35 @@ local function ShowHud()
     end)
 end
 
+local HideGen = 0
 local function StartHiding()
+    HideGen += 1 -- cancels a pending un-hide from the previous trip
     Hiding = true
     if MenuController then
         for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
     end
 end
 
+-- The roll animation of the last craft keeps running for several seconds after the trip; its late menu opens and
+-- cutscene calls must still be swallowed, so the block is lifted 15 s later and the HUD is shown again then.
 local function StopHiding()
-    Hiding = false
-    if MenuController then
-        for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+    HideGen += 1
+    local gen = HideGen
+    local function closeAll()
+        if MenuController then
+            for _, n in ipairs(CRAFT_MENUS) do pcall(MenuController.Close, MenuController, n) end
+        end
     end
+    closeAll()
     ShowHud()
-    task.delay(0.6, ShowHud)
-    task.delay(2.5, ShowHud)
+    task.delay(1, function() if gen == HideGen then closeAll() ShowHud() end end)
+    task.delay(15, function()
+        if gen ~= HideGen then return end
+        Hiding = false
+        closeAll()
+        ShowHud()
+        task.delay(1, function() if gen == HideGen then ShowHud() end end)
+    end)
 end
 
 -- ── server answers ──
@@ -665,7 +685,7 @@ local function CraftStage(stage)
             warn("[Craft] " .. stage.machine .. ": " .. tostring(why))
             if fails >= 4 then break end
             task.wait(math.min(0.5 * 2 ^ (fails - 1), 4))
-            GoTo(stage.point)
+            ReGoTo(stage.point)
         end
     end
     return crafted
@@ -1284,11 +1304,17 @@ LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
         end, 6)
         if not entrance then warn("[PetDefense] colosseum entrance not found on any unlocked island") return end
         local cf = entrance:IsA("Model") and entrance:GetPivot() or entrance.CFrame
-        TeleportTo(cf.Position + Vector3.new(0, 3, 0), 0.8)
         Opponents = {}
-        local r = Invoke(RF("ColosseumService", "StartWaveDefense"))
-        print("[PetDefense] StartWaveDefense: " .. Dump(r))
-        if type(r) ~= "table" or r.OnCooldown or r.Error then return end
+        local r
+        for try = 1, 3 do -- stand inside the entrance volume and let the server see it before starting
+            TeleportTo(cf.Position + Vector3.new(0, 1 + try, 0), 1.5)
+            r = Invoke(RF("ColosseumService", "StartWaveDefense"))
+            print("[PetDefense] StartWaveDefense try " .. try .. ": " .. Dump(r))
+            if type(r) == "table" and not r.Error and not r.OnCooldown then break end
+            if type(r) == "table" and r.OnCooldown then return end
+            task.wait(1)
+        end
+        if type(r) ~= "table" or r.OnCooldown or r.Error then Status("PetDefense: could not start (" .. Dump(r) .. ")") return end
         if type(r.PendingSpawns) == "table" then for _, e in ipairs(r.PendingSpawns) do Opponents[e.Id] = e end end
         ColRunning = true
         local attack, crit = RF("ColosseumService", "AttackOpponent"), RF("ColosseumService", "CriticalAttackOpponent")
