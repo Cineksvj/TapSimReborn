@@ -1436,34 +1436,8 @@ pcall(function()
     end))
 end)
 
--- hatch animation: destroy the hatch screens while the egg toggle is on
-local function IsHatchGui(obj)
-    if not obj:IsA("ScreenGui") then return false end
-    local n = string.lower(obj.Name)
-    -- never touch cutscene screens: destroying them leaves the game's ScreenHide hold active = whole UI gone
-    if string.find(n, "secret") or string.find(n, "cutscene") or string.find(n, "layer") then return false end
-    -- "Hatching" is the game's own hatch HUD (Auto Open button, egg prompt): the egg controller keeps a reference to it
-    -- and errors forever when it is gone; the animation itself is off through the game's setting
-    if n == "hatching" then return false end
-    return string.find(n, "reveal") or string.find(n, "opening")
-end
--- the hatch animation lives on the game's "Hatching" screen; while the opener runs that screen is kept disabled
--- (never destroyed: the egg controller keeps a reference to it), so no egg animation plays at all
-local function KeepHatchingOff(g)
-    if not (g and g:IsA("ScreenGui") and g.Name == "Hatching") then return end
-    if g:GetAttribute("CorvusHooked") then return end
-    g:SetAttribute("CorvusHooked", true)
-    g:GetPropertyChangedSignal("Enabled"):Connect(function() if EggWanted and g.Enabled then g.Enabled = false end end)
-    if EggWanted then g.Enabled = false end
-end
-pcall(function()
-    local pg = LocalPlayer:WaitForChild("PlayerGui")
-    pg.ChildAdded:Connect(function(child)
-        if EggWanted and IsHatchGui(child) then pcall(function() child:Destroy() end) end
-        KeepHatchingOff(child)
-    end)
-    KeepHatchingOff(pg:FindFirstChild("Hatching"))
-end)
+-- the hatch animation is skipped in the hatch renderer itself (see "no hatch animation" further down): nothing of the
+-- game's hatch screens is destroyed or disabled, the egg controller keeps every reference it needs
 
 Main:CreateToggle({
     Name = "Auto Open Void Egg",
@@ -1471,10 +1445,6 @@ Main:CreateToggle({
     Callback = function(Value)
         EggWanted = Value
         if EggConn then EggConn:Disconnect() EggConn = nil end
-        pcall(function()
-            local g = LocalPlayer.PlayerGui:FindFirstChild("Hatching")
-            if g then KeepHatchingOff(g) g.Enabled = not Value end
-        end)
         if not Value then return end
         if not EggEvent then warn("[Egg] remote not found") return end
         -- the game's own "Hatch animation: Off" (3): the hatch renderer never takes the HUD away for a reveal.
@@ -1488,12 +1458,6 @@ Main:CreateToggle({
                 task.wait(5)
             end
         end)
-        local pg = LocalPlayer:FindFirstChild("PlayerGui")
-        if pg then
-            for _, g in ipairs(pg:GetChildren()) do
-                if IsHatchGui(g) then pcall(function() g:Destroy() end) end
-            end
-        end
         Pending, NextSendAt = {}, 0
         EggConn = RunService.Heartbeat:Connect(function()
             if Killed then EggConn:Disconnect() return end
@@ -1997,6 +1961,25 @@ end
 -- This checks every second and repairs what has been stuck for a few seconds, without touching menus the game has open.
 local HatchRenderer
 pcall(function() HatchRenderer = require(ReplicatedStorage.Modules.Client.Pets.HatchRenderer) end)
+-- no hatch animation while the opener runs: HatchRenderer:Play(egg, result, done) is what plays the wobble / crack /
+-- reveal for every hatch (the "Hatch animation" setting only decides the rare reveal). While the egg switch is on, Play
+-- answers at once by calling `done` (the renderer's own failure path does exactly this), so a hatch is just the server's
+-- answer: the pets land in the storage and the next request goes out immediately. Off switch = the game's own animation.
+pcall(function()
+    if type(HatchRenderer) ~= "table" or type(HatchRenderer.Play) ~= "function" then warn("[Egg] hatch renderer not found: animations stay on") return end
+    if table.isfrozen(HatchRenderer) and not (setreadonly and pcall(setreadonly, HatchRenderer, false)) then warn("[Egg] hatch renderer is read-only: animations stay on") return end
+    local realPlay = HatchRenderer.Play
+    HatchRenderer.Play = function(self, egg, result, done, receipt)
+        if EggWanted then
+            if type(done) == "function" then
+                local ok, err = pcall(done)
+                if not ok then warn("[Egg] hatch finish callback: " .. tostring(err)) end
+            end
+            return
+        end
+        return realPlay(self, egg, result, done, receipt)
+    end
+end)
 local function HudReasonsAndSlots()
     local set = RealSetHudHidden or (HudController and HudController.SetHudHidden)
     if not set then return nil, nil end
@@ -2562,34 +2545,81 @@ local function FindBreakable(typeMatch)
     return nil
 end
 
--- stands next to the breakable and taps it until it is gone; returns true when broken
+local BreakableConfig = Req({ "Shared", "Game", "BreakableConfig" })
+-- the server counts a tap when you are within TapRange (14) of the breakable's edge and TapHeight (12) of its bottom,
+-- measured against its current hop pose: BreakableConfig.InRange(position, cframe, size) is that exact check
+local function BreakableInRange(hrpPos, cf, size)
+    if BreakableConfig and type(BreakableConfig.InRange) == "function" then
+        local ok, r = pcall(BreakableConfig.InRange, hrpPos, cf, size)
+        if ok then return r == true end
+    end
+    local d = (hrpPos - cf.Position) * Vector3.new(1, 0, 1)
+    local horiz = math.max(d.Magnitude - math.max(size.X, size.Z) * 0.5, 0)
+    return horiz <= 14 and math.abs(hrpPos.Y - (cf.Position.Y - size.Y * 0.5)) <= 12
+end
+local BreakParams = RaycastParams.new()
+BreakParams.FilterType = Enum.RaycastFilterType.Exclude
+-- a spot on the ground right next to the breakable's landing place, on the side you already are
+local function StandNextTo(m, rest, size, from)
+    local radius = math.max(size.X, size.Z) * 0.5
+    local side = (from - rest.Position) * Vector3.new(1, 0, 1)
+    if side.Magnitude < 0.5 then side = rest.LookVector * Vector3.new(1, 0, 1) end
+    if side.Magnitude < 0.5 then side = Vector3.new(1, 0, 0) end
+    side = side.Unit
+    local bottom = rest.Position.Y - size.Y * 0.5
+    local ignore = { m }
+    if LocalPlayer.Character then table.insert(ignore, LocalPlayer.Character) end
+    BreakParams.FilterDescendantsInstances = ignore
+    for _, dir in ipairs({ side, -side }) do
+        local p = Vector3.new(rest.Position.X, bottom, rest.Position.Z) + dir * (radius + 4)
+        local hit = workspace:Raycast(p + Vector3.new(0, 6, 0), Vector3.new(0, -14, 0), BreakParams)
+        if hit then return Vector3.new(p.X, hit.Position.Y + 3, p.Z) end
+    end
+    return Vector3.new(rest.Position.X, bottom + 3, rest.Position.Z) + side * (radius + 4)
+end
+-- stands next to the breakable and taps it until it is gone. It hops away in bursts when hit (8-12 studs per hop, five
+-- hops per burst, bigger flips now and then), so the moment its landing spot (BreakableRest) is out of tap range the
+-- character is snapped to the ground next to it (a plain CFrame set: no anchoring, no settling) and keeps tapping.
+-- Returns true when it broke.
 local function BreakIt(m, alive)
-    local t0 = os.clock()
-    while alive() and m.Parent and os.clock() - t0 < 120 do
-        if m:GetAttribute("BreakableBroken") == true or (m:GetAttribute("BreakableHealth") or 0) <= 0 then return true end
-        local rest, size = m:GetAttribute("BreakableRest"), m:GetAttribute("BreakableSize")
+    local t0, lastSnap, lastHealth, lastDamage = os.clock(), 0, nil, os.clock()
+    local taps, snaps = 0, 0
+    while alive() and m.Parent and os.clock() - t0 < 100 do
+        if m:GetAttribute("BreakableBroken") == true then return true end
+        local health = m:GetAttribute("BreakableHealth")
+        if type(health) == "number" and health <= 0 then return true end
+        if m:GetAttribute("BreakableDespawned") == true then warn("[Breakable] it left before it broke") return false end
+        if health ~= lastHealth then lastHealth = health lastDamage = os.clock() end
+        if os.clock() - lastDamage > 25 then warn("[Breakable] no damage for 25 s (" .. taps .. " taps, " .. snaps .. " moves): giving up on it") return false end
         local hrp = GetHrp()
-        if typeof(rest) == "CFrame" and typeof(size) == "Vector3" and hrp then
-            local d = (hrp.Position - rest.Position) * Vector3.new(1, 0, 1)
-            local horiz = math.max(d.Magnitude - math.max(size.X, size.Z) * 0.5, 0)
-            local vert = math.abs(hrp.Position.Y - (rest.Position.Y - size.Y * 0.5))
-            if horiz > 10 or vert > 10 then
-                TeleportTo(rest.Position + Vector3.new(0, size.Y * 0.5 + 2, 0) + rest.LookVector * (math.max(size.X, size.Z) * 0.5 + 5), 0.25)
+        if hrp then
+            local rest, size = m:GetAttribute("BreakableRest"), m:GetAttribute("BreakableSize")
+            if typeof(rest) ~= "CFrame" then rest = m:GetPivot() end
+            if typeof(size) ~= "Vector3" then size = m:GetExtentsSize() end
+            -- out of range of where it lands -> go there now (where it is right now mid-hop does not matter)
+            if not BreakableInRange(hrp.Position, rest, size) and os.clock() - lastSnap > 0.12 then
+                lastSnap = os.clock()
+                snaps += 1
+                local stand = StandNextTo(m, rest, size, hrp.Position)
+                hrp.AssemblyLinearVelocity = Vector3.zero
+                hrp.AssemblyAngularVelocity = Vector3.zero
+                hrp.CFrame = CFrame.lookAt(stand, Vector3.new(rest.Position.X, stand.Y, rest.Position.Z))
             end
             Tap()
+            taps += 1
         end
-        task.wait(0.11) -- GameConfig.ClickFxInterval; server HitInterval 0.1
+        task.wait(0.1) -- BreakableConfig.HitInterval
     end
-    return false
+    return m:GetAttribute("BreakableBroken") == true
 end
 
+-- all the ready spots in ONE trip (island to island), then home once; a spot that did not work out waits 5 min
 LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function(alive)
     local data = GetData()
     if not (data and IslandBreakableConfig) then Status("Breakables: config / data not ready") return end
     local spotsFolder = workspace:FindFirstChild("IslandBreakableSpots")
-    local anyReady = false
+    local todo = {}
     for _, id in ipairs(SPOT_ORDER) do
-        if not alive() then return end
         local cfg = SpotCfg(id)
         local pos = spotsFolder and spotsFolder:GetAttribute(id)
         if cfg and (typeof(pos) == "Vector3" or (cfg.Island and CurrentIsland() ~= cfg.Island)) then
@@ -2597,37 +2627,44 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
             pcall(function() unlocked = IslandBreakableConfig.IsUnlocked(data, cfg) end)
             local ready = 0
             pcall(function() ready = IslandBreakableConfig.GetReadyAt(data, id) end)
-            if unlocked and (ready or 0) <= Now() and not Skipped("breakable:" .. id) then
-                anyReady = true
-                Trip("breakable", function()
-                    Skip("breakable:" .. id, 300) -- cleared below when it worked
-                    if not TravelTo(cfg.Island) then return end
-                    local sf = WaitFor(function() return workspace:FindFirstChild("IslandBreakableSpots") end, 10)
-                    pos = (sf and sf:GetAttribute(id)) or pos
-                    if typeof(pos) ~= "Vector3" then Skip("breakable:" .. id, 300, "spot position not published yet") return end
-                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.5)
+            if unlocked and (ready or 0) <= Now() and not Skipped("breakable:" .. id) then table.insert(todo, { id = id, cfg = cfg, pos = pos }) end
+        end
+    end
+    if #todo == 0 then Status("Breakables: all on cooldown or locked") return end
+    Trip("breakable", function()
+        for _, job in ipairs(todo) do
+            if not alive() then return end
+            local id, cfg, pos = job.id, job.cfg, job.pos
+            Skip("breakable:" .. id, 300) -- shortened below when it worked
+            if TravelTo(cfg.Island) then
+                local sf = WaitFor(function() return workspace:FindFirstChild("IslandBreakableSpots") end, 10)
+                pos = (sf and sf:GetAttribute(id)) or pos
+                if typeof(pos) ~= "Vector3" then
+                    Skip("breakable:" .. id, 300, "spot position not published yet")
+                else
+                    Status("Breakables: " .. tostring(cfg.Title or id))
+                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.4)
                     local m
-                    for _ = 1, 40 do -- the server spawns your instance once you are near the spot
+                    for _ = 1, 40 do -- the server spawns your instance once you are within 100 studs of the spot
                         m = FindBreakable(function(t) return t == cfg.Type end)
                         if m or not alive() then break end
                         task.wait(0.25)
                     end
                     if m then
                         if BreakIt(m, alive) then
-                            print("[Breakable] broke " .. tostring(m:GetAttribute("BreakableTitle") or id))
+                            print("[Breakable] broke " .. tostring(m:GetAttribute("BreakableTitle") or cfg.Title or id))
                             Skip("breakable:" .. id, 90) -- the data needs a moment to show the new cooldown
                         else
                             Skip("breakable:" .. id, 300, "could not break it")
                         end
-                        task.wait(1.5)
+                        task.wait(1)
                     else
                         Skip("breakable:" .. id, 300, "no breakable appeared (island locked or still on cooldown?)")
                     end
-                end)
+                end
             end
         end
-    end
-    if not anyReady then Status("Breakables: all on cooldown or locked") end
+    end)
 end)
 
 -- ── dig site (Autumn) ──
@@ -2713,32 +2750,39 @@ local CHESTS = { { Id = "SkyIsland", Island = "Sky Island" }, { Id = "Desert", I
 LoopToggle("Auto Open Chests", 15, function(alive)
     local data = GetData()
     if not (data and TapChestConfig) then return end
+    local todo = {}
     for _, chest in ipairs(CHESTS) do
-        if not alive() then return end
         local readyAt = 0
         pcall(function() readyAt = TapChestConfig.GetReadyAt(data, chest.Id) end)
-        if (readyAt or 0) - Now() <= 0 and not Skipped("chest:" .. chest.Id) then
-            Trip("chest", function()
-                Skip("chest:" .. chest.Id, 300)
-                if not TravelTo(chest.Island) then return end
+        if (readyAt or 0) - Now() <= 0 and not Skipped("chest:" .. chest.Id) then table.insert(todo, chest) end
+    end
+    if #todo == 0 then return end
+    Trip("chest", function()
+        for _, chest in ipairs(todo) do
+            if not alive() then return end
+            Skip("chest:" .. chest.Id, 300)
+            if TravelTo(chest.Island) then
                 local m = WaitFor(function()
                     for _, c in ipairs(CollectionService:GetTagged("TapChest")) do
                         if c:GetAttribute("TapChestId") == chest.Id then return c end
                     end
                 end, 10)
-                if not m then Skip("chest:" .. chest.Id, 300, "chest model not found on " .. chest.Island) return end
-                local front, size = m:GetAttribute("TapChestFront"), m:GetAttribute("TapChestSize")
-                local anchor = typeof(front) == "CFrame" and (front.Position - Vector3.new(0, (typeof(size) == "Vector3" and size.Y or 4) / 2, 0)) or m:GetPivot().Position
-                local look = typeof(front) == "CFrame" and front.LookVector or Vector3.new(0, 0, 1)
-                TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.6)
-                local r = Invoke(RF("TapChestService", "Claim"), chest.Id)
-                print("[Chest] " .. chest.Id .. ": " .. Dump(r))
-                if type(r) == "table" and (r.Success or r.Claimed) then Skip("chest:" .. chest.Id, 120)
-                else Skip("chest:" .. chest.Id, 300, "claim failed: " .. Dump(r)) end
-                task.wait(0.5)
-            end)
+                if not m then
+                    Skip("chest:" .. chest.Id, 300, "chest model not found on " .. chest.Island)
+                else
+                    local front, size = m:GetAttribute("TapChestFront"), m:GetAttribute("TapChestSize")
+                    local anchor = typeof(front) == "CFrame" and (front.Position - Vector3.new(0, (typeof(size) == "Vector3" and size.Y or 4) / 2, 0)) or m:GetPivot().Position
+                    local look = typeof(front) == "CFrame" and front.LookVector or Vector3.new(0, 0, 1)
+                    TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.6)
+                    local r = Invoke(RF("TapChestService", "Claim"), chest.Id)
+                    print("[Chest] " .. chest.Id .. ": " .. Dump(r))
+                    if type(r) == "table" and (r.Success or r.Claimed) then Skip("chest:" .. chest.Id, 120)
+                    else Skip("chest:" .. chest.Id, 300, "claim failed: " .. Dump(r)) end
+                    task.wait(0.5)
+                end
+            end
         end
-    end
+    end)
 end)
 
 -- ── shrine: keep the "Golden" blessing (golden & rainbow chance); it resets when you leave the game ──
