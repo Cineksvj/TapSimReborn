@@ -26,7 +26,7 @@ local TeleportService = game:GetService("TeleportService")
 
 -- ─────────────────────────── theme ───────────────────────────
 local ACCENTS = {
-    { "Blurple", Color3.fromRGB(88, 101, 242) }, { "Crimson", Color3.fromRGB(224, 49, 61) },
+    { "Corvus", Color3.fromRGB(198, 202, 214) }, { "Blurple", Color3.fromRGB(88, 101, 242) }, { "Crimson", Color3.fromRGB(224, 49, 61) },
     { "Emerald", Color3.fromRGB(60, 196, 138) }, { "Violet", Color3.fromRGB(154, 107, 255) }, { "Amber", Color3.fromRGB(255, 138, 61) },
 }
 local T = {
@@ -102,6 +102,16 @@ function H.Hover(b, rest, hover, prop)
     b.MouseEnter:Connect(function() H.Tween(b, 0.14, { [prop] = hover }) end)
     b.MouseLeave:Connect(function() H.Tween(b, 0.2, { [prop] = rest }) end)
 end
+function H.Press(o)
+    local sc = o:FindFirstChild("PressScale") or H.New("UIScale", { Name = "PressScale" }, o)
+    sc.Scale = 0.96
+    H.Tween(sc, 0.35, { Scale = 1 }, Enum.EasingStyle.Back)
+end
+-- a bright top edge on a stroke (light falling on the glass)
+function H.Rim(stroke)
+    H.New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.18, 0.45), NumberSequenceKeypoint.new(1, 0.72) }) }, stroke)
+    return stroke
+end
 function H.Glass(f, factor) f.BackgroundTransparency = math.clamp(T.Glass * (factor or 1), 0, 0.75) return f end
 function H.OnAccent(fn) UI.AccentHooks[#UI.AccentHooks + 1] = fn fn(T.Accent) end
 function H.Time(s) s = math.floor(s) return string.format("%d:%02d", s // 60, s % 60) end
@@ -109,6 +119,63 @@ function H.Ping()
     local ok, v = pcall(function() return StatsService.Network.ServerStatsItem["Data Ping"]:GetValue() end)
     return ok and math.floor(v + 0.5) or 0
 end
+
+-- ─────────────────────────── sounds ───────────────────────────
+-- tiny synthesized sounds (16-bit mono WAV, written once to the executor's folder): nothing is downloaded
+local SoundService = game:GetService("SoundService")
+local SR = 22050
+local SYNTH = {
+    click = { 0.07, function(t) return math.sin(2 * math.pi * (900 + 400 * math.exp(-t * 90)) * t) * math.exp(-t * 60) * 0.5 end },
+    hover = { 0.035, function(t) return math.sin(2 * math.pi * 2600 * t) * math.exp(-t * 180) * 0.18 end },
+    tick = { 0.03, function(t) return math.sin(2 * math.pi * 3200 * t) * math.exp(-t * 200) * 0.35 end },
+    toggle = { 0.1, function(t)
+        local a = math.sin(2 * math.pi * 1700 * t) * math.exp(-t * 150)
+        local t2 = t - 0.04
+        local b = t2 > 0 and math.sin(2 * math.pi * 2500 * t2) * math.exp(-t2 * 150) or 0
+        return (a + b) * 0.35
+    end },
+    open = { 0.22, function(t) local p = t / 0.22 return (math.random() * 2 - 1) * math.sin(math.pi * p) ^ 2 * 0.22 end },
+    close = { 0.12, function(t) return math.sin(2 * math.pi * (700 - 300 * t / 0.12) * t) * math.exp(-t * 30) * 0.3 end },
+    notify = { 0.6, function(t)
+        local a = (math.sin(2 * math.pi * 988 * t) + math.sin(2 * math.pi * 1976 * t) * 0.25) * math.exp(-t * 8)
+        local t2 = t - 0.09
+        local b = t2 > 0 and (math.sin(2 * math.pi * 1319 * t2) + math.sin(2 * math.pi * 2638 * t2) * 0.25) * math.exp(-t2 * 8) or 0
+        return (a + b) * 0.22
+    end },
+    drag = { 0.16, function(t) local p = t / 0.16 return (math.random() * 2 - 1) * math.sin(math.pi * p) ^ 3 * 0.12 end },
+}
+local SoundIds, SoundPool = {}, {}
+local function RenderWav(def)
+    local n = math.floor(SR * def[1])
+    local bytes = table.create(n)
+    for i = 1, n do
+        local t = (i - 1) / SR
+        local v = math.clamp(def[2](t) * math.min(1, (n - i) / (SR * 0.004)), -1, 1)
+        local sv = math.floor(v * 32767)
+        if sv < 0 then sv += 65536 end
+        bytes[i] = string.char(sv % 256, sv // 256)
+    end
+    local data = table.concat(bytes)
+    local function u32(x) return string.char(x % 256, (x // 256) % 256, (x // 65536) % 256, (x // 16777216) % 256) end
+    local function u16(x) return string.char(x % 256, (x // 256) % 256) end
+    return "RIFF" .. u32(36 + #data) .. "WAVEfmt " .. u32(16) .. u16(1) .. u16(1) .. u32(SR) .. u32(SR * 2) .. u16(2) .. u16(16) .. "data" .. u32(#data) .. data
+end
+local SoundsOn, SoundVolume = true, 55
+local function Play(name, pitch)
+    if not SoundsOn then return end
+    local id = SoundIds[name]
+    if not id then return end
+    local pool = SoundPool[name]
+    if not pool then pool = { i = 0 } SoundPool[name] = pool end
+    pool.i = pool.i % 3 + 1
+    local snd = pool[pool.i]
+    if not snd then snd = Instance.new("Sound") snd.SoundId = id snd.Parent = UI.Screen pool[pool.i] = snd end
+    snd.PlaybackSpeed = (pitch or 1) * (1 + (math.random() - 0.5) * 0.06)
+    snd.Volume = SoundVolume / 100 * 1.5
+    snd.TimePosition = 0
+    pcall(function() SoundService:PlayLocalSound(snd) end)
+end
+H.Play = Play
 
 local function GuiParent()
     local ok, hui = pcall(function() return gethui and gethui() end)
@@ -121,8 +188,20 @@ end
 -- ─────────────────────────── saved config ───────────────────────────
 local Folder = "CorvusTapSim"
 pcall(function() if makefolder and isfolder and not isfolder(Folder) then makefolder(Folder) end end)
+task.spawn(function()
+    if not (writefile and getcustomasset) then return end
+    pcall(function() if makefolder and isfolder and not isfolder(Folder .. "/sounds") then makefolder(Folder .. "/sounds") end end)
+    for name, def in pairs(SYNTH) do
+        pcall(function()
+            local path = Folder .. "/sounds/" .. name .. ".wav"
+            if not (isfile and isfile(path)) then writefile(path, RenderWav(def)) end
+            SoundIds[name] = getcustomasset(path)
+        end)
+        task.wait()
+    end
+end)
 local ConfigFile = Folder .. "/config.json"
-Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil }, Toggles = {} }
+Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil, Sounds = true, Volume = 55, Scale = 100, MenuKey = "RightShift", FpsCap = 0, JoinAlerts = false }, Toggles = {} }
 pcall(function()
     if isfile and readfile and isfile(ConfigFile) then
         local d = HttpService:JSONDecode(readfile(ConfigFile))
@@ -144,6 +223,8 @@ function Config.Save()
 end
 T.Accent = (ACCENTS[Config.Data.Accent] or ACCENTS[1])[2]
 T.Glass = math.clamp((tonumber(Config.Data.Glass) or 35) / 100, 0, 0.75)
+SoundsOn = Config.Data.Sounds ~= false
+SoundVolume = tonumber(Config.Data.Volume) or 55
 
 -- ─────────────────────────── root ───────────────────────────
 UI = { Pages = {}, Rows = {}, Refreshers = {}, AccentHooks = {}, History = {}, Unread = 0, Visible = true, Binds = {}, Toggles = {}, Status = "idle" }
@@ -151,7 +232,8 @@ local Screen = H.New("ScreenGui", { Name = "CorvusHub", IgnoreGuiInset = true, R
 UI.Screen = Screen
 local WIN_W, WIN_H, SIDE_W = 880, 640, 188
 local Win = H.Frame({ Name = "Window", Size = UDim2.fromOffset(WIN_W, WIN_H), Position = UDim2.new(0.5, -WIN_W / 2, 0.5, -WIN_H / 2), BackgroundColor3 = T.Bg, ClipsDescendants = true }, Screen)
-H.Corner(Win, 18) H.Stroke(Win, 0.74) H.Glass(Win, 1)
+H.Corner(Win, 18) H.Rim(H.Stroke(Win, 0.74)) H.Glass(Win, 1)
+local WinScale = H.New("UIScale", { Scale = math.clamp((tonumber(Config.Data.Scale) or 100) / 100, 0.75, 1.3) }, Win)
 if type(Config.Data.Win) == "table" and tonumber(Config.Data.Win[1]) then Win.Position = UDim2.fromOffset(Config.Data.Win[1], Config.Data.Win[2]) end
 -- starlight behind the window (downloaded once, then read from the executor's workspace folder)
 local Stars = H.New("ImageLabel", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ImageTransparency = 1, ScaleType = Enum.ScaleType.Crop, ZIndex = 0 }, Win)
@@ -168,7 +250,7 @@ task.spawn(function()
     if ok and Stars.Image ~= "" then H.Tween(Stars, 0.6, { ImageTransparency = 0.35 }) end
 end)
 local Panel = H.Frame({ Position = UDim2.fromOffset(SIDE_W, 0), Size = UDim2.new(1, -SIDE_W, 1, 0), BackgroundColor3 = T.Panel, ZIndex = 2 }, Win)
-H.Corner(Panel, 18) H.Stroke(Panel, 0.8) H.Glass(Panel, 0.7)
+H.Corner(Panel, 18) H.Rim(H.Stroke(Panel, 0.8)) H.Glass(Panel, 0.7)
 local Shine = H.Frame({ Size = UDim2.new(1, 0, 0, 160), BackgroundColor3 = T.White, ZIndex = 2 }, Panel)
 H.Corner(Shine, 18)
 H.New("UIGradient", { Rotation = 90, Transparency = NumberSequence.new({ NumberSequenceKeypoint.new(0, 0.965), NumberSequenceKeypoint.new(1, 1) }) }, Shine)
@@ -201,9 +283,11 @@ local function NavGroup(name)
 end
 
 -- footer: credit line, divider, user card
-H.Text({ Text = "corvus hub  ·  v2.0", TextSize = 11, TextColor3 = T.Dim, TextTransparency = 0.25, Position = UDim2.new(0, 14, 1, -104), Size = UDim2.new(0, SIDE_W - 28, 0, 16), ZIndex = 3 }, Win)
-H.Frame({ Position = UDim2.new(0, 14, 1, -82), Size = UDim2.new(0, SIDE_W - 28, 0, 1), BackgroundColor3 = T.White, BackgroundTransparency = 0.93, ZIndex = 3 }, Win)
+local Footer = {}
+Footer[1] = H.Text({ Text = "corvus hub  ·  v2.0  ·  made by Dastan", TextSize = 11, TextColor3 = T.Dim, TextTransparency = 0.25, Position = UDim2.new(0, 14, 1, -104), Size = UDim2.new(0, SIDE_W - 28, 0, 16), ZIndex = 3 }, Win)
+Footer[2] = H.Frame({ Position = UDim2.new(0, 14, 1, -82), Size = UDim2.new(0, SIDE_W - 28, 0, 1), BackgroundColor3 = T.White, BackgroundTransparency = 0.93, ZIndex = 3 }, Win)
 local Prof = H.Button({ Position = UDim2.new(0, 8, 1, -74), Size = UDim2.fromOffset(SIDE_W - 16, 62), BackgroundColor3 = T.White, BackgroundTransparency = 1, ZIndex = 3 }, Win)
+Footer[3] = Prof
 H.Corner(Prof, 12)
 local Avatar = H.New("ImageLabel", { Position = UDim2.fromOffset(8, 12), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = T.Field, BorderSizePixel = 0, Image = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150", ZIndex = 4 }, Prof)
 H.Corner(Avatar, 19)
@@ -213,6 +297,8 @@ H.Text({ Text = LocalPlayer.DisplayName, Font = FONT_BOLD, TextSize = 13, TextCo
 H.Text({ Text = "Owner", TextSize = 12, TextColor3 = T.Sub, Position = UDim2.fromOffset(56, 32), Size = UDim2.new(1, -82, 0, 16), ZIndex = 4 }, Prof)
 H.Icon("chevron-right", 14, T.Sub, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), ZIndex = 4 }, Prof)
 H.Hover(Prof, 1, 0.965, "BackgroundTransparency")
+Prof.MouseEnter:Connect(function() Play("hover") end)
+Prof.MouseButton1Click:Connect(function() Play("click") H.Press(Prof) UI:Open("Settings") end)
 
 -- ─────────────────────────── header ───────────────────────────
 local Header = H.Frame({ Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 3 }, Panel)
@@ -231,8 +317,9 @@ local function HeaderButton(icon, tip, order)
     local b = H.Button({ Size = UDim2.fromOffset(32, 32), BackgroundColor3 = T.Field, BackgroundTransparency = 0, LayoutOrder = order, ZIndex = 4 }, Tools)
     H.Corner(b, 9) H.Stroke(b, 0.92)
     local ic = H.Icon(icon, 15, T.Sub, { AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5), ZIndex = 5 }, b)
-    b.MouseEnter:Connect(function() H.Tween(b, 0.14, { BackgroundColor3 = T.Hover }) ic.ImageColor3 = T.Text UI.Tip(b, tip) end)
+    b.MouseEnter:Connect(function() H.Tween(b, 0.14, { BackgroundColor3 = T.Hover }) ic.ImageColor3 = T.Text UI.Tip(b, tip) Play("hover") end)
     b.MouseLeave:Connect(function() H.Tween(b, 0.2, { BackgroundColor3 = T.Field }) ic.ImageColor3 = T.Sub UI.HideTip() end)
+    b.MouseButton1Click:Connect(function() Play("click") H.Press(b) end)
     return b, ic
 end
 H.Frame({ Position = UDim2.fromOffset(18, 64), Size = UDim2.new(1, -36, 0, 1), BackgroundColor3 = T.White, BackgroundTransparency = 0.935, ZIndex = 3 }, Panel)
@@ -302,6 +389,7 @@ function UI:Notify(title, text, seconds, icon)
     local bar = H.Frame({ AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 12, 1, -6), Size = UDim2.new(1, -24, 0, 2), BackgroundColor3 = T.Accent, BackgroundTransparency = 0.25, ZIndex = 72 }, card)
     H.Corner(bar, 1)
     local dur = seconds or 4
+    Play("notify")
     TweenService:Create(bar, TweenInfo.new(dur, Enum.EasingStyle.Linear), { Size = UDim2.new(0, 0, 0, 2) }):Play()
     card.Position = UDim2.fromOffset(40, 0)
     H.Tween(card, 0.4, { Position = UDim2.fromOffset(0, 0) })
@@ -313,6 +401,8 @@ end
 
 -- ─────────────────────────── pages, sections, rows ───────────────────────────
 local Current
+local Minimized = false
+local SetMinimized
 local function PaintNav()
     for _, p in ipairs(UI.Pages) do
         local act = p == Current
@@ -321,10 +411,12 @@ local function PaintNav()
         p.Icon.ImageColor3 = act and T.Accent or T.Sub
     end
 end
+H.OnAccent(function() PaintNav() end)
 function UI:Open(page)
     if type(page) == "string" then for _, p in ipairs(UI.Pages) do if p.Name == page then page = p end end end
     if type(page) ~= "table" then return end
     ClosePop()
+    if Minimized then SetMinimized(false) end
     for _, p in ipairs(UI.Pages) do p.Scroll.Visible = p == page end
     local changed = Current ~= page
     Current = page
@@ -336,8 +428,11 @@ function UI:Open(page)
         H.Tween(Pill, 0.28, { Position = UDim2.fromOffset(10, y) })
     end)
     if changed then
-        page.Content.Position = UDim2.fromOffset(0, 12)
+        page.Content.Position = UDim2.fromOffset(0, 14)
         H.Tween(page.Content, 0.35, { Position = UDim2.fromOffset(0, 0) })
+        local fade = H.Frame({ Size = UDim2.fromScale(1, 1), BackgroundColor3 = T.Panel, BackgroundTransparency = 0.4, ZIndex = 9 }, Body)
+        H.Tween(fade, 0.25, { BackgroundTransparency = 1 })
+        task.delay(0.3, function() fade:Destroy() end)
     end
     Config.Data.Page = page.Name Config.Save()
 end
@@ -350,9 +445,9 @@ function UI:Page(name, group, icon, desc)
     page.Icon = H.Icon(icon, 16, T.Sub, { AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), ZIndex = 4 }, btn)
     page.Label = H.Text({ Text = name, Position = UDim2.fromOffset(38, 0), Size = UDim2.new(1, -50, 1, 0), TextSize = 14, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, btn)
     page.Button = btn
-    btn.MouseEnter:Connect(function() if Current ~= page then H.Tween(btn, 0.14, { BackgroundTransparency = 0.97 }) end H.Tween(page.Icon, 0.2, { Position = UDim2.new(0, 14, 0.5, 0) }) UI.Tip(btn, desc) end)
+    btn.MouseEnter:Connect(function() if Current ~= page then H.Tween(btn, 0.14, { BackgroundTransparency = 0.97 }) end H.Tween(page.Icon, 0.2, { Position = UDim2.new(0, 14, 0.5, 0) }) UI.Tip(btn, desc) Play("hover") end)
     btn.MouseLeave:Connect(function() H.Tween(btn, 0.2, { BackgroundTransparency = 1 }) H.Tween(page.Icon, 0.22, { Position = UDim2.new(0, 12, 0.5, 0) }) UI.HideTip() end)
-    btn.MouseButton1Click:Connect(function() UI:Open(page) end)
+    btn.MouseButton1Click:Connect(function() Play("click") UI:Open(page) end)
     local scroll = H.New("ScrollingFrame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = T.White, ScrollBarImageTransparency = 0.8, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false, ZIndex = 3 }, Body)
     local content = H.Frame({ Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, ZIndex = 3 }, scroll)
     H.Pad(content, 12, 18, 18, 18)
@@ -371,7 +466,7 @@ function UI:Page(name, group, icon, desc)
         H.VList(wrap, 0) H.Pad(wrap, 0, 0, 16, 0)
         H.Text({ Text = string.upper(title), Font = FONT_BOLD, TextSize = 11, TextColor3 = T.Dim, Size = UDim2.new(1, 0, 0, 30), LayoutOrder = 0, ZIndex = 3 }, wrap)
         local card = H.Frame({ Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = T.Card, LayoutOrder = 1, ZIndex = 3 }, wrap)
-        H.Corner(card, 12) H.Stroke(card, 0.955) H.Glass(card, 0.35) H.VList(card, 0)
+        H.Corner(card, 12) H.Rim(H.Stroke(card, 0.955)) H.Glass(card, 0.35) H.VList(card, 0)
         local section = { Card = card, N = 0 }
         local function shell(height, label, icon, desc, tall)
             section.N += 1
@@ -387,16 +482,16 @@ function UI:Page(name, group, icon, desc)
             H.New("UIFlexItem", { FlexMode = Enum.UIFlexMode.Fill }, lbl)
             local right = H.Frame({ Size = UDim2.fromOffset(0, 28), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, LayoutOrder = 3, ZIndex = 5 }, inner)
             H.HList(right, 10, Enum.HorizontalAlignment.Right)
-            r.MouseEnter:Connect(function() H.Tween(hov, 0.14, { BackgroundTransparency = 0.965 }) lbl.TextColor3 = T.Text UI.Tip(r, desc) end)
+            r.MouseEnter:Connect(function() H.Tween(hov, 0.14, { BackgroundTransparency = 0.965 }) lbl.TextColor3 = T.Text UI.Tip(r, desc) Play("hover") end)
             r.MouseLeave:Connect(function() H.Tween(hov, 0.2, { BackgroundTransparency = 1 }) lbl.TextColor3 = T.Label UI.HideTip() end)
             table.insert(page.Rows, { Frame = r, Text = string.lower((label or "") .. " " .. (desc or "")) })
             return r, right, lbl
         end
 
         function section:Row(key, value, icon)
-            local r, right = shell(40, key, icon)
+            local r, right, lbl = shell(40, key, icon)
             local v = H.Text({ Text = type(value) == "function" and "" or tostring(value), Size = UDim2.fromOffset(0, 28), AutomaticSize = Enum.AutomaticSize.X, TextSize = 13, TextColor3 = T.Sub, TextXAlignment = Enum.TextXAlignment.Right, LayoutOrder = 1, ZIndex = 5 }, right)
-            local obj = {}
+            local obj = { Key = lbl, Frame = r }
             function obj:Set(t) v.Text = tostring(t) end
             if type(value) == "function" then table.insert(UI.Refreshers, function() local ok, res = pcall(value) if ok then v.Text = tostring(res) end end) end
             return obj
@@ -431,9 +526,9 @@ function UI:Page(name, group, icon, desc)
             if icon then H.Icon(icon, 15, T.Sub, { LayoutOrder = 1, ZIndex = 5 }, inner) end
             H.Text({ Text = text, Size = UDim2.fromOffset(0, 20), AutomaticSize = Enum.AutomaticSize.X, TextSize = 13, LayoutOrder = 2, ZIndex = 5 }, inner)
             H.Hover(b, T.Field, T.Hover)
-            b.MouseEnter:Connect(function() UI.Tip(b, desc) end)
+            b.MouseEnter:Connect(function() UI.Tip(b, desc) Play("hover") end)
             b.MouseLeave:Connect(UI.HideTip)
-            b.MouseButton1Click:Connect(function() task.spawn(cb) end)
+            b.MouseButton1Click:Connect(function() Play("click") H.Press(b) task.spawn(cb) end)
             table.insert(page.Rows, { Frame = wrap, Text = string.lower(text) })
         end
         function section:Toggle(name, default, cb, icon, desc)
@@ -448,7 +543,7 @@ function UI:Page(name, group, icon, desc)
             H.Corner(knob, 7)
             local function paint()
                 H.Tween(trk, 0.22, { BackgroundColor3 = obj.Value and T.Accent or T.Off })
-                H.Tween(knob, 0.26, { Position = UDim2.new(0, obj.Value and 26 or 10, 0.5, 0), BackgroundColor3 = obj.Value and T.White or T.Sub })
+                H.Tween(knob, 0.26, { Position = UDim2.new(0, obj.Value and 26 or 10, 0.5, 0), BackgroundColor3 = obj.Value and (T.Accent == ACCENTS[1][2] and T.Bg or T.White) or T.Sub })
                 local key = UI.Binds[name]
                 tag.Visible = key ~= nil
                 tag.Text = key and string.lower(string.gsub(key, "Right", "r"):gsub("Left", "l")) or ""
@@ -459,6 +554,9 @@ function UI:Page(name, group, icon, desc)
                 if obj.Value == v then paint() return end
                 obj.Value = v
                 paint()
+                Play("toggle", v and 1.08 or 0.92)
+                H.Tween(knob, 0.09, { Size = UDim2.fromOffset(20, 14) })
+                task.delay(0.09, function() H.Tween(knob, 0.24, { Size = UDim2.fromOffset(14, 14) }, Enum.EasingStyle.Back) end)
                 if not silent then task.spawn(cb, v) end
                 Config.Data.Toggles[name] = v Config.Save()
             end
@@ -500,16 +598,55 @@ function UI:Page(name, group, icon, desc)
             end
             local hit = H.Button({ Size = UDim2.new(0, 128, 1, 0), ZIndex = 8 }, holder)
             local dragging = false
-            hit.MouseButton1Down:Connect(function() dragging = true end)
-            UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 and dragging then dragging = false task.spawn(cb, cur) end end)
+            hit.MouseButton1Down:Connect(function() dragging = true H.Tween(knob, 0.15, { Size = UDim2.fromOffset(16, 16) }) end)
+            hit.MouseEnter:Connect(function() if not dragging then H.Tween(knob, 0.14, { Size = UDim2.fromOffset(14, 14) }) end end)
+            hit.MouseLeave:Connect(function() if not dragging then H.Tween(knob, 0.16, { Size = UDim2.fromOffset(12, 12) }) end end)
+            UIS.InputEnded:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 and dragging then dragging = false H.Tween(knob, 0.2, { Size = UDim2.fromOffset(12, 12) }) task.spawn(cb, cur) end end)
+            local obj = {}
+            function obj:Set(v) cur = math.clamp(v, min, max) draw() end
+            local lastTick = nil
             UIS.InputChanged:Connect(function(i)
                 if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
                     local x0, w = trk.AbsolutePosition.X, trk.AbsoluteSize.X
                     cur = math.clamp(min + (i.Position.X - x0) / w * (max - min), min, max)
+                    local v = math.floor(cur + 0.5)
+                    if v ~= lastTick then lastTick = v Play("tick", 0.9 + 0.3 * (cur - min) / (max - min)) end
                     draw()
                 end
             end)
             draw()
+            return obj
+        end
+        -- text input: cb(text) when you press Enter or leave the box
+        function section:Input(name, placeholder, cb, icon, width)
+            local r, right = shell(40, name, icon)
+            local box = H.New("TextBox", { Size = UDim2.fromOffset(width or 170, 28), BackgroundColor3 = T.Field, BorderSizePixel = 0, Text = "", PlaceholderText = placeholder or "", PlaceholderColor3 = T.Dim, TextColor3 = T.Label, Font = FONT, TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false, ClipsDescendants = true, LayoutOrder = 1, ZIndex = 5 }, right)
+            H.Corner(box, 7) local st = H.Stroke(box, 0.92) H.Pad(box, 0, 10, 0, 10)
+            box.Focused:Connect(function() st.Color = T.Accent st.Transparency = 0.35 end)
+            box.FocusLost:Connect(function(enter) st.Color = T.White st.Transparency = 0.92 if cb then task.spawn(cb, box.Text, enter) end end)
+            local obj = {}
+            function obj:Get() return box.Text end
+            function obj:Set(t) box.Text = tostring(t) end
+            return obj
+        end
+        -- key capture: shows the current key, click to press a new one
+        function section:Keybind(name, current, cb, icon)
+            local r, right = shell(40, name, icon)
+            local b = H.Button({ Size = UDim2.fromOffset(0, 24), AutomaticSize = Enum.AutomaticSize.X, BackgroundColor3 = T.Field, BackgroundTransparency = 0, Text = current, TextSize = 12, TextColor3 = T.Label, LayoutOrder = 1, ZIndex = 5 }, right)
+            H.Corner(b, 6) H.Stroke(b, 0.92) H.Pad(b, 0, 10, 0, 10)
+            H.New("UISizeConstraint", { MinSize = Vector2.new(44, 24) }, b)
+            local function listen()
+                Play("click")
+                b.Text = "press a key" b.TextColor3 = T.Accent
+                UI.Listening = function(key)
+                    b.TextColor3 = T.Label
+                    if key == "Escape" then b.Text = current return end
+                    current = key b.Text = key
+                    task.spawn(cb, key)
+                end
+            end
+            b.MouseButton1Click:Connect(listen)
+            r.MouseButton1Click:Connect(listen)
         end
         function section:Graph(sampler, n)
             section.N += 1
@@ -550,8 +687,10 @@ function UI:Page(name, group, icon, desc)
             H.Corner(av, 30)
             local ring = H.New("UIStroke", { Color = T.Accent, Thickness = 2, Transparency = 0.2 }, av)
             H.OnAccent(function(a) ring.Color = a end)
-            H.Text({ Text = greeting, Font = FONT_BOLD, TextSize = 17, TextColor3 = T.Text, Position = UDim2.fromOffset(88, 18), Size = UDim2.new(1, -100, 0, 22), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
-            H.Text({ Text = sub, TextSize = 12, TextColor3 = T.Sub, Position = UDim2.fromOffset(88, 42), Size = UDim2.new(1, -100, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
+            H.Text({ Text = greeting, Font = FONT_BOLD, TextSize = 15, TextColor3 = T.Text, Position = UDim2.fromOffset(88, 16), Size = UDim2.new(1, -96, 0, 22), TextScaled = true, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
+            H.New("UITextSizeConstraint", { MaxTextSize = 16, MinTextSize = 10 }, wrap:FindFirstChildOfClass("TextLabel"))
+            local subL = H.Text({ Text = type(sub) == "function" and sub() or sub, TextSize = 12, TextColor3 = T.Sub, Position = UDim2.fromOffset(88, 42), Size = UDim2.new(1, -96, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
+            if type(sub) == "function" then table.insert(UI.Refreshers, function() subL.Text = sub() end) end
             local row = H.Frame({ Position = UDim2.fromOffset(88, 62), Size = UDim2.new(1, -100, 0, 20), BackgroundTransparency = 1, ZIndex = 4 }, wrap)
             H.HList(row, 6)
             local labels = {}
@@ -580,21 +719,27 @@ SearchBox.FocusLost:Connect(function() SearchStroke.Color = T.White SearchStroke
 -- ─────────────────────────── window controls ───────────────────────────
 function UI:SetVisible(v)
     UI.Visible = v
+    local target = math.clamp((tonumber(Config.Data.Scale) or 100) / 100, 0.75, 1.3)
     if v then
         Win.Visible = true
-        local sc = Win:FindFirstChildOfClass("UIScale") or H.New("UIScale", {}, Win)
-        sc.Scale = 0.95
-        H.Tween(sc, 0.4, { Scale = 1 }, Enum.EasingStyle.Back)
+        WinScale.Scale = target * 0.94
+        H.Tween(WinScale, 0.45, { Scale = target }, Enum.EasingStyle.Back)
+        Play("open")
     else
         ClosePop() UI.HideTip()
-        Win.Visible = false
+        Play("close")
+        H.Tween(WinScale, 0.2, { Scale = target * 0.95 }, Enum.EasingStyle.Quad)
+        task.delay(0.2, function() if not UI.Visible then Win.Visible = false end end)
     end
 end
-local Minimized = false
 local MinButton, MinIcon
-local function SetMinimized(v)
+SetMinimized = function(v)
     Minimized = v
     ClosePop()
+    Play(v and "close" or "open")
+    for _, o in ipairs(Footer) do o.Visible = not v end
+    Nav.Visible = not v
+    Body.Visible = not v
     H.Tween(Win, 0.3, { Size = UDim2.fromOffset(WIN_W, v and 66 or WIN_H) })
     if MinIcon then local d = ICONS[v and "maximize" or "minus"] MinIcon.ImageRectOffset = Vector2.new(d[2], d[3]) MinIcon.Image = "rbxassetid://" .. d[1] end
 end
@@ -622,6 +767,7 @@ do
         if m.X >= sp.X and m.X <= sp.X + ss.X and m.Y >= sp.Y and m.Y <= sp.Y + ss.Y then return end
         if m.X >= tp.X and m.X <= tp.X + ts.X and m.Y >= tp.Y and m.Y <= tp.Y + ts.Y then return end
         dragging, startMouse, startPos = true, m, Win.Position
+        Play("drag", 1.1)
     end
     Header.InputBegan:Connect(begin)
     Brand.InputBegan:Connect(begin)
@@ -634,6 +780,7 @@ do
     UIS.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 and dragging then
             dragging = false
+            Play("drag", 0.8)
             Config.Data.Win = { Win.AbsolutePosition.X, Win.AbsolutePosition.Y } Config.Save()
         end
     end)
@@ -645,7 +792,7 @@ UIS.InputBegan:Connect(function(input, gp)
     local key = input.KeyCode.Name
     if UI.Listening then local fn = UI.Listening UI.Listening = nil fn(key) return end
     if UIS:GetFocusedTextBox() then return end
-    if key == "RightShift" then UI:SetVisible(not UI.Visible) return end
+    if key == (Config.Data.MenuKey or "RightShift") then UI:SetVisible(not UI.Visible) return end
     if key == "F" and UI.Visible and (UIS:IsKeyDown(Enum.KeyCode.LeftControl) or UIS:IsKeyDown(Enum.KeyCode.RightControl)) then SearchBox:CaptureFocus() return end
     if gp then return end
     for _, t in ipairs(UI.Toggles) do
@@ -666,7 +813,7 @@ H.Text({ Text = "C", Font = FONT_BOLD, TextSize = 13, TextColor3 = T.White, Size
 H.OnAccent(function(a) WmMark.BackgroundColor3 = a end)
 H.Text({ Text = "Corvus", Font = FONT_BOLD, TextSize = 15, TextColor3 = T.Text, Size = UDim2.fromOffset(0, 38), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = 2, ZIndex = 21 }, Wm)
 local WmItems = {}
-for i, d in ipairs({ { "fps", "gauge" }, { "ping", "wifi" }, { "time", "timer" }, { "exec", "cpu" }, { "status", "activity" } }) do
+for i, d in ipairs({ { "fps", "gauge" }, { "ping", "wifi" }, { "time", "timer" }, { "exec", "cpu" } }) do
     H.Frame({ Size = UDim2.fromOffset(1, 16), BackgroundColor3 = T.White, BackgroundTransparency = 0.85, LayoutOrder = 10 + i * 2, ZIndex = 21 }, Wm)
     local grp = H.Frame({ Size = UDim2.fromOffset(0, 38), AutomaticSize = Enum.AutomaticSize.X, BackgroundTransparency = 1, LayoutOrder = 11 + i * 2, ZIndex = 21 }, Wm)
     H.HList(grp, 6)
@@ -688,7 +835,7 @@ end)
 task.spawn(function()
     while not Killed do
         WmItems.fps.Text = Fps .. " FPS" WmItems.ping.Text = H.Ping() .. " ms"
-        WmItems.time.Text = H.Time(os.clock() - SessionStart) WmItems.exec.Text = Executor WmItems.status.Text = UI.Status
+        WmItems.time.Text = H.Time(os.clock() - SessionStart) WmItems.exec.Text = Executor
         for _, r in ipairs(UI.Refreshers) do pcall(r) end
         task.wait(0.5)
     end
@@ -715,7 +862,7 @@ local Perf = Dashboard:Section("Performance", "Left")
 Perf:Graph(function() return Fps end, 60)
 local Welcome = Dashboard:Section("Welcome", "Right")
 local hour = tonumber(os.date("%H")) or 12
-Welcome:Hero(string.format("Good %s, %s", hour < 12 and "morning" or hour < 18 and "afternoon" or "evening", LocalPlayer.DisplayName), "Press Right Shift to open or close the menu",
+Welcome:Hero(string.format("Good %s, %s", hour < 12 and "morning" or hour < 18 and "afternoon" or "evening", LocalPlayer.DisplayName), function() return "Press " .. (Config.Data.MenuKey or "RightShift"):gsub("(%l)(%u)", "%1 %2") .. " to open or close the menu" end,
     { function() local n = 0 for _ in pairs(UI.Binds) do n += 1 end return n .. (n == 1 and " keybind" or " keybinds") end, function() return ACCENTS[Config.Data.Accent or 1][1] .. " theme" end, "Autosave" })
 local Shortcuts = Dashboard:Section("Shortcuts", "Right")
 Shortcuts:Button("Farm", function() UI:Open(Farm) end, "egg")
@@ -729,6 +876,18 @@ local Sections = {
     Minigames = Farm:Section("Minigames & events", "Right"),
     Islands = Explore:Section("Islands", "Left"), Protection = Protect:Section("Session", "Left"),
 }
+local PerfSec = Protect:Section("Performance", "Right")
+PerfSec:Slider("FPS cap (0 = unlimited)", 0, 360, Config.Data.FpsCap or 0, function(v)
+    Config.Data.FpsCap = v Config.Save()
+    if setfpscap then pcall(setfpscap, v) end
+end, "", "gauge")
+if setfpscap and (tonumber(Config.Data.FpsCap) or 0) > 0 then pcall(setfpscap, Config.Data.FpsCap) end
+PerfSec:Button("Stop rendering (AFK)", function()
+    RunService:Set3dRenderingEnabled(false)
+    UI:Notify("Rendering off", "The 3D world is not drawn any more. Click again to turn it back on.", 5, "moon")
+    local b
+    b = UIS.InputBegan:Connect(function(i) if i.UserInputType == Enum.UserInputType.MouseButton1 then RunService:Set3dRenderingEnabled(true) b:Disconnect() end end)
+end, "moon")
 local ServerSec = Server:Section("Server", "Left")
 ServerSec:Row("Job ID", string.sub(game.JobId, 1, 13), "server")
 ServerSec:Row("Place ID", tostring(game.PlaceId), "map")
@@ -741,12 +900,57 @@ ServerSec:Button("Server hop", function()
     UI:Notify("Server hop", "Joining another server…", 3, "zap")
     TeleportService:TeleportToPlaceInstance(game.PlaceId, list[math.random(#list)].id, LocalPlayer)
 end, "zap")
+ServerSec:Button("Smallest server", function()
+    local ok, res = pcall(function() return HttpService:JSONDecode(game:HttpGet("https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100")) end)
+    local list = {}
+    if ok and type(res) == "table" and type(res.data) == "table" then for _, s in ipairs(res.data) do if s.id ~= game.JobId and (s.playing or 0) < (s.maxPlayers or 0) then list[#list + 1] = s end end end
+    table.sort(list, function(a, b) return (a.playing or 0) < (b.playing or 0) end)
+    if #list == 0 then UI:Notify("Smallest server", "No other open servers found.", 3) return end
+    UI:Notify("Smallest server", "Joining a server with " .. tostring(list[1].playing or 0) .. " players…", 3, "users")
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, list[1].id, LocalPlayer)
+end, "users")
 ServerSec:Button("Copy Job ID", function() if setclipboard then setclipboard(game.JobId) UI:Notify("Copied", game.JobId, 2, "save") end end, "save")
+ServerSec:Button("Copy join script", function()
+    if setclipboard then
+        setclipboard(string.format('game:GetService("TeleportService"):TeleportToPlaceInstance(%d, "%s", game:GetService("Players").LocalPlayer)', game.PlaceId, game.JobId))
+        UI:Notify("Copied", "A script that joins this exact server.", 2, "save")
+    end
+end, "terminal")
+local JoinSec = Server:Section("Join a server", "Left")
+local JobBox = JoinSec:Input("Job ID", "paste a job id", nil, "search", 190)
+JoinSec:Button("Join that server", function()
+    local id = (JobBox:Get():gsub("%s", ""))
+    if not id:match("^%x+%-%x+%-%x+%-%x+%-%x+$") then UI:Notify("Join", "That is not a valid Job ID.", 3) return end
+    UI:Notify("Join", "Teleporting…", 3, "zap")
+    TeleportService:TeleportToPlaceInstance(game.PlaceId, id, LocalPlayer)
+end, "zap")
+local PlayersSec = Server:Section("Players", "Right")
+PlayersSec:Row("In this server", function() return #Players:GetPlayers() .. " / " .. Players.MaxPlayers end, "users")
+local PlayerRows = {}
+for i = 1, 12 do PlayerRows[i] = PlayersSec:Row("", "", "user") end
+local function RefreshPlayers()
+    local list = Players:GetPlayers()
+    table.sort(list, function(a, b) if a == LocalPlayer then return true end if b == LocalPlayer then return false end return a.DisplayName:lower() < b.DisplayName:lower() end)
+    for i, row in ipairs(PlayerRows) do
+        local p = list[i]
+        row.Key.Text = p and p.DisplayName or ""
+        row.Key.Parent.Parent.Visible = p ~= nil
+        row:Set(p and ("@" .. p.Name) or "")
+    end
+end
+table.insert(UI.Refreshers, RefreshPlayers)
+PlayersSec:Toggle("Join / leave alerts", Config.Data.JoinAlerts == true, function(v) Config.Data.JoinAlerts = v Config.Save() end, "bell", "A notification when someone joins or leaves the server")
+Players.PlayerAdded:Connect(function(p) if Config.Data.JoinAlerts then UI:Notify(p.DisplayName, "joined the server", 3, "user") end end)
+Players.PlayerRemoving:Connect(function(p) if Config.Data.JoinAlerts then UI:Notify(p.DisplayName, "left the server", 3, "user") end end)
 
 local SetMenu = Settings:Section("Menu", "Left")
-SetMenu:Row("Toggle menu", "Right Shift", "keyboard")
+SetMenu:Keybind("Menu key", Config.Data.MenuKey or "RightShift", function(k) Config.Data.MenuKey = k Config.Save() end, "keyboard")
 SetMenu:Row("Search", "Ctrl+F", "search")
 SetMenu:Row("Keybinds", "right-click a switch", "click")
+SetMenu:Slider("Menu size", 75, 130, Config.Data.Scale or 100, function(v) Config.Data.Scale = v Config.Save() H.Tween(WinScale, 0.3, { Scale = v / 100 }) end, "%", "maximize")
+local SetSound = Settings:Section("Sounds", "Left")
+SetSound:Toggle("Menu sounds", Config.Data.Sounds ~= false, function(v) SoundsOn = v Config.Data.Sounds = v Config.Save() end, "activity")
+SetSound:Slider("Volume", 0, 100, Config.Data.Volume or 55, function(v) SoundVolume = v Config.Data.Volume = v Config.Save() Play("notify") end, "%", "activity")
 local SetTheme = Settings:Section("Appearance", "Right")
 SetTheme:Button("Next accent color", function() UI:SetAccent((Config.Data.Accent or 1) + 1) end, "palette")
 SetTheme:Slider("Transparency", 0, 75, Config.Data.Glass or 35, function(v) UI:SetGlass(v) end, "%", "layers")
@@ -823,7 +1027,6 @@ CloseButton.MouseButton1Click:Connect(function() UI:SetVisible(false) end)
 local PLACE = {
     ["Auto Tap"] = { "Automation", "click", true }, ["Auto Equip Best"] = { "Automation", "sparkles", false },
     ["Auto Open Void Egg"] = { "Automation", "egg", true }, ["Auto Craft (Golden > Diamond > Rainbow)"] = { "Automation", "hammer", true },
-    ["Delete junk when storage is saturated (Common/Rare normals)"] = { "Automation", "trash", true },
     ["Auto Breakables (Void Crystal, clusters, mushrooms...)"] = { "Minigames", "gem", true }, ["Auto Dig Site"] = { "Minigames", "shovel", true },
     ["Auto Open Chests"] = { "Minigames", "box", true }, ["Auto Shrine (Golden blessing)"] = { "Minigames", "flame", true },
     ["Auto Click Lucky Duck"] = { "Minigames", "target", true }, ["Auto Events (balloons, pigs, lucky blocks, meteors)"] = { "Minigames", "zap", true },
@@ -1869,7 +2072,7 @@ local function RarityOf(name)
     local c = OriginalPetCatalog and OriginalPetCatalog[name]
     return (type(c) == "table" and c.Rarity) or "?"
 end
-local JunkCleanup = true
+local JunkCleanup = false -- junk deletion is off: the hub never deletes pets on its own
 
 local function DeleteIds(ids)
     if #ids == 0 then return end
@@ -2008,11 +2211,6 @@ Main:CreateToggle({
     end,
 })
 
-Main:CreateToggle({
-    Name = "Delete junk when storage is saturated (Common/Rare normals)",
-    CurrentValue = false,
-    Callback = function(Value) JunkCleanup = Value end,
-})
 
 -- ═══════════ EXTRA FEATURES (dig site, chests, shrine, breakables, mining, pet defense, duck, events) ═══════════
 -- Everything below was read from the game's own client code; the server is not visible, so distance / timing rules are
@@ -2356,28 +2554,63 @@ do
         Callback = function(Value) DuckOn = Value end,
     })
     -- The game's own LuckyDuckyController:CatchShown() clicks the duck on screen for real: it claims the reward,
-    -- plays the catch effects and removes the duck. A raw Claim left the duck waddling on screen.
+    -- plays the catch effects and removes the duck. The duck appears on screen a little after the Spawn event
+    -- (the controller may hold it while a menu is open), so we wait for it up to its lifetime (10 s).
     local DuckController
     pcall(function() DuckController = require(ReplicatedStorage.Controllers.Game.LuckyDuckyController) end)
+    local function DuckGui()
+        local pg = LocalPlayer:FindFirstChild("PlayerGui")
+        local g = pg and pg:FindFirstChild("LuckyDucky")
+        if not (g and g.Enabled) then return nil end
+        for _, d in ipairs(g:GetDescendants()) do
+            if d:IsA("GuiButton") and d.Active and d.Visible then return g, d end
+        end
+        return g, nil
+    end
+    local function PressButton(btn)
+        local ok = false
+        pcall(function()
+            if getconnections then
+                for _, c in ipairs(getconnections(btn.MouseButton1Click)) do if c.Fire then c:Fire() ok = true end end
+                for _, c in ipairs(getconnections(btn.Activated)) do if c.Fire then c:Fire() ok = true end end
+            elseif firesignal then
+                firesignal(btn.MouseButton1Click) firesignal(btn.Activated) ok = true
+            end
+        end)
+        return ok
+    end
     if spawnEv then
         spawnEv.OnClientEvent:Connect(function(d)
             if not DuckOn or type(d) ~= "table" or type(d.Id) ~= "string" then return end
-            task.wait(0.45) -- MinReaction 0.3 s
+            local t0 = os.clock()
+            local gui, btn
+            while os.clock() - t0 < 9 do
+                gui, btn = DuckGui()
+                if btn then break end
+                task.wait(0.1)
+            end
+            task.wait(0.4) -- MinReaction 0.3 s after it is shown
             local caught = false
             if DuckController and type(DuckController.CatchShown) == "function" then
-                for _ = 1, 10 do -- the controller registers the duck a moment after the event
+                for _ = 1, 15 do
                     local ok, res = pcall(DuckController.CatchShown, DuckController)
                     if ok and res == true then caught = true break end
                     task.wait(0.2)
                 end
             end
+            if not caught and btn and btn.Parent then caught = PressButton(btn) if caught then print("[Duck] pressed the duck button") end end
             if caught then
-                print("[Duck] caught via the game's catch")
+                print("[Duck] caught (" .. string.format("%.1f", os.clock() - t0) .. " s after spawn)")
                 Status("duck caught")
             else
                 local r = Invoke(RF("LuckyDuckyService", "Claim"), d.Id)
-                if type(r) == "table" and r.Success then print("[Duck] " .. tostring(r.Reward or "caught"))
-                else warn("[Duck] " .. tostring(type(r) == "table" and r.Reason or r)) end
+                if type(r) == "table" and r.Success then
+                    print("[Duck] claimed directly: " .. tostring(r.Reward or "ok"))
+                    Status("duck claimed")
+                    task.delay(0.5, function() local g = DuckGui() if g then pcall(function() for _, c in ipairs(g:GetChildren()) do c:Destroy() end end) end end)
+                else
+                    warn("[Duck] " .. tostring(type(r) == "table" and r.Reason or r))
+                end
             end
         end)
     end
