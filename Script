@@ -933,7 +933,7 @@ local DigWorld = Req({ "Shared", "Minigames", "DigWorld" })
 
 -- The game's own DigController:Activate() does Begin / Hit with the right timing (and draws the bar), so we just stand
 -- in the zone and call it whenever the cursor is inside the target. It answers { Error = "Busy" | "TooSoon" | ... }.
-local DigController
+local DigController, DigRewardPopup
 pcall(function() DigController = require(ReplicatedStorage.Controllers.Minigames.DigController) end)
 
 LoopToggle("Auto Dig Site", 5, function(alive)
@@ -961,8 +961,12 @@ LoopToggle("Auto Dig Site", 5, function(alive)
             local s = DigController:GetState()
             local fire = true
             if type(s) == "table" and type(s.Round) == "table" then
+                -- "perfect" = cursor within the inner 40 % of the target (DigController uses Width * 0.4 / 2);
+                -- the hit time is passed to the server, so this is exact, not latency-dependent
                 local now = Now()
-                fire = now >= (s.Round.Epoch or 0) and DigConfig.IsHit(s.Round, now)
+                local r = s.Round
+                local ok, d = pcall(function() return math.abs(DigConfig.Cursor(r, now) - r.Center) end)
+                fire = ok and now >= (r.Epoch or 0) and d <= r.Width * 0.4 / 2 * 0.85
             end
             if fire then
                 local r = DigController:Activate()
@@ -977,11 +981,23 @@ LoopToggle("Auto Dig Site", 5, function(alive)
                 elseif type(r) == "table" and r.Complete then
                     print("[Dig] " .. tostring(r.Reward) .. " x" .. tostring(r.Amount))
                     task.wait(1.7)
+                    pcall(function() DigRewardPopup:Close() end)
                 end
             end
-            task.wait(0.05)
+            task.wait()
         end
     end)
+end)
+
+-- the "You Found!" screen after a dig is DigRewardPopup.Show -> RewardPopupController; skipped while auto-dig runs
+pcall(function()
+    DigRewardPopup = require(ReplicatedStorage.Controllers.Minigames.DigRewardPopup)
+    if type(DigRewardPopup) ~= "table" or table.isfrozen(DigRewardPopup) then return end
+    local realShow = DigRewardPopup.Show
+    DigRewardPopup.Show = function(...)
+        if BusyBy == "dig" then return end
+        return realShow(...)
+    end
 end)
 
 -- ── tap chests (Sky Island, Desert): TapChestService.RF.Claim(id) once the 6 h cooldown is over ──
@@ -1298,7 +1314,7 @@ local function CellOre(x, y, z)
     if not c then
         local ore, stats
         pcall(function() ore, stats = MC.Ore(MineState.Seed, x, y, z) end)
-        c = { value = Field(ore, "value", "Value") or 1, health = Field(stats, "health", "Health") or 4, req = Field(stats, "pickaxeRequirement", "PickaxeRequirement") or 0 }
+        c = { name = Field(ore, "name", "Name") or "?", value = Field(ore, "value", "Value") or 1, health = Field(stats, "health", "Health") or 4, req = Field(stats, "pickaxeRequirement", "PickaxeRequirement") or 0 }
         OreCache[k] = c
     end
     return c
@@ -1314,7 +1330,7 @@ local function PickCell()
         for x = 0, w - 1 do
             for z = 0, h - 1 do
                 local k = MC.Key(x, y, z)
-                if not Removed[k] then
+                if not Removed[k] and (BadCells[k] or 0) < os.clock() then
                     local exposed = y == 0
                     if not exposed then pcall(function() exposed = MC.Exposed(Removed, x, y, z) end) end
                     if exposed then
@@ -1331,17 +1347,43 @@ local function PickCell()
     return best
 end
 
-local function StandFor(x, y, z)
+-- the server only accepts a hit when MiningSight.CanSee(marker, removed, eye, x, y, z) passes for your position
+-- ("That block is behind solid rock." otherwise), so every candidate spot is checked with the same function first.
+local MSight = Req({ "Shared", "Minigames", "Mining", "MiningSight" })
+local BadCells = {} -- [key] = os.clock() until which the cell is skipped
+
+local function CanSeeFrom(pos, x, y, z)
+    if not MSight then return true end
+    local ok, res = pcall(MSight.CanSee, MineMarker(), Removed, pos + Vector3.new(0, 1.5, 0), x, y, z)
+    return ok and res == true
+end
+
+-- candidate spots to stand on, best first; each one is verified with CanSeeFrom
+local function StandSpots(x, y, z)
     local marker = MineMarker()
     local pos = MC.Position(marker, x, y, z)
     local size = MC.BlockSize or 4
-    if y == 0 then return pos + Vector3.new(0, size / 2 + 3, 0) end
-    for _, n in ipairs({ { 0, -1, 0 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 } }) do
+    local spots = {}
+    if y == 0 then table.insert(spots, pos + Vector3.new(0, size / 2 + 3, 0)) end
+    for _, n in ipairs({ { 0, -1, 0 }, { 1, 0, 0 }, { -1, 0, 0 }, { 0, 0, 1 }, { 0, 0, -1 } }) do
         local nx, ny, nz = x + n[1], y + n[2], z + n[3]
-        if ny < 0 then return pos + Vector3.new(0, size / 2 + 3, 0) end
-        if Removed[MC.Key(nx, ny, nz)] then return MC.Position(marker, nx, ny, nz) end
+        if ny < 0 then
+            table.insert(spots, pos + Vector3.new(0, size / 2 + 3, 0))
+        elseif Removed[MC.Key(nx, ny, nz)] then
+            local c = MC.Position(marker, nx, ny, nz)
+            table.insert(spots, c - Vector3.new(0, size / 2 - 3, 0)) -- feet on the floor of that empty cell
+            table.insert(spots, c)
+        end
     end
-    return pos + Vector3.new(0, size, 0)
+    table.insert(spots, pos + Vector3.new(0, size, 0))
+    return spots
+end
+
+local function StandFor(x, y, z)
+    for _, p in ipairs(StandSpots(x, y, z)) do
+        if CanSeeFrom(p, x, y, z) then return p end
+    end
+    return nil
 end
 
 local function MineSell()
@@ -1391,34 +1433,63 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
             ApplyState(r)
         end
         if not MineMarker() then warn("[Mine] mine marker (workspace.MineArea.MineArea) not loaded yet") task.wait(1) return end
-        if (MineState.Count or 0) >= (MineState.Capacity or math.huge) then MineSell() return end
-        local c = PickCell()
-        if not c then task.wait(2) return end
-        local x, y, z = c.X, c.Y, c.Z
-        local tool = ToolInfo()
-        local pos = MC.Position(MineMarker(), x, y, z)
-        local fails = 0
-        while alive() and fails < 5 do
-            local hrp = GetHrp()
-            if not hrp or (hrp.Position - pos).Magnitude > tool.Range - 2 then TeleportTo(StandFor(x, y, z), 0.3) end
-            local r = Invoke(hit, MineState.Id, x, y, z)
-            if type(r) ~= "table" then warn("[Mine] hit returned " .. tostring(r)) fails += 1 task.wait(0.5)
-            elseif r.Throttled then task.wait(0.3)
-            elseif r.Error then warn("[Mine] hit " .. MC.Key(x, y, z) .. ": " .. Dump(r)) fails += 1 task.wait(0.5)
-            else
-                if r.State then ApplyState(r.State) end
-                if r.Broken then
-                    Removed[r.Key or MC.Key(x, y, z)] = true
-                    local dropId = (type(r.Drop) == "table" and r.Drop.Id) or r.Key or MC.Key(x, y, z)
-                    if r.Drop ~= nil then
-                        TeleportTo(pos, 0.35)
-                        local cr = Invoke(collect, MineState.Id, dropId)
-                        if type(cr) == "table" and cr.State then ApplyState(cr.State) end
-                    end
-                    break
-                end
-                task.wait(tool.Interval)
+        -- mine block after block without leaving this call (no 0.5 s gaps between blocks)
+        local mined, t0 = 0, os.clock()
+        while alive() and LocalPlayer:GetAttribute("MiningActive") == true do
+            if (MineState.Count or 0) >= (MineState.Capacity or math.huge) then
+                Status("Mine: bag full, selling")
+                MineSell()
+                if (MineState.Count or 0) >= (MineState.Capacity or math.huge) then task.wait(3) break end
             end
+            local c = PickCell()
+            if not c then Status("Mine: no block to mine (all mined? waiting for the refill)") task.wait(2) break end
+            local x, y, z = c.X, c.Y, c.Z
+            local tool = ToolInfo()
+            local pos = MC.Position(MineMarker(), x, y, z)
+            local ore = CellOre(x, y, z)
+            local fails, hits = 0, 0
+            local key = MC.Key(x, y, z)
+            while alive() and fails < 4 do
+                local hrp = GetHrp()
+                if not hrp or (hrp.Position - pos).Magnitude > tool.Range - 2 or not CanSeeFrom(hrp.Position, x, y, z) then
+                    local spot = StandFor(x, y, z)
+                    if not spot then
+                        warn("[Mine] " .. key .. " (" .. ore.name .. "): no spot with line of sight, skipping it")
+                        BadCells[key] = os.clock() + 120
+                        break
+                    end
+                    TeleportTo(spot, 0.45) -- give the server time to see the new position
+                end
+                local r = Invoke(hit, MineState.Id, x, y, z)
+                if type(r) ~= "table" then warn("[Mine] hit returned " .. tostring(r)) fails += 1 task.wait(0.5)
+                elseif r.Throttled then task.wait(0.15)
+                elseif r.Error then
+                    fails += 1
+                    local h = GetHrp()
+                    warn(string.format("[Mine] hit %s (%s) try %d: %s | me=%s sees=%s", key, ore.name, fails, Dump(r),
+                        h and tostring(h.Position) or "?", tostring(h and CanSeeFrom(h.Position, x, y, z))))
+                    if fails >= 4 then BadCells[key] = os.clock() + 120 end
+                    task.wait(0.4)
+                else
+                    hits += 1
+                    if r.State then ApplyState(r.State) end
+                    if r.Broken then
+                        mined += 1
+                        Removed[r.Key or MC.Key(x, y, z)] = true
+                        if r.Drop ~= nil then
+                            local dropId = (type(r.Drop) == "table" and r.Drop.Id) or r.Key or MC.Key(x, y, z)
+                            local h = GetHrp()
+                            if not h or (h.Position - pos).Magnitude > 8 then TeleportTo(pos, 0.15) end
+                            local cr = Invoke(collect, MineState.Id, dropId)
+                            if type(cr) == "table" and cr.State then ApplyState(cr.State) end
+                        end
+                        break
+                    end
+                    task.wait(tool.Interval)
+                end
+            end
+            Status(string.format("Mine: %d blocks (%.1f/min) | bag %s/%s | last: %s", mined, mined / math.max(os.clock() - t0, 1) * 60,
+                tostring(MineState.Count), tostring(MineState.Capacity), tostring(hits) .. " hits"))
         end
     end)
     if not ok then warn("[Mine] " .. tostring(err)) end
