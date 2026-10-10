@@ -1136,6 +1136,17 @@ Main:CreateToggle({
         if EggConn then EggConn:Disconnect() EggConn = nil end
         if not Value then return end
         if not EggEvent then warn("[Egg] remote not found") return end
+        -- the game's own "Hatch animation: Off" (3): the hatch renderer never takes the HUD away for a reveal.
+        -- This is the setting the HUD-disappearing bug came from: a reveal disables the Game screen and only its own
+        -- ending turns it back on. Set it on the client at once and saved on the server for the next sessions.
+        task.spawn(function()
+            pcall(function() workspace:SetAttribute("HatchAnimation", 3) end)
+            pcall(function() ReplicatedStorage.RemoteServices.SettingsService.RF.UpdateSetting:InvokeServer({ Name = "HatchAnimation", Value = 3 }) end)
+            while EggWanted and not Killed do
+                if workspace:GetAttribute("HatchAnimation") ~= 3 then pcall(function() workspace:SetAttribute("HatchAnimation", 3) end) end
+                task.wait(5)
+            end
+        end)
         local pg = LocalPlayer:FindFirstChild("PlayerGui")
         if pg then
             for _, g in ipairs(pg:GetChildren()) do
@@ -1589,6 +1600,90 @@ local function ShowHud()
         end
     end)
 end
+
+-- ── HUD watchdog ──
+-- The HUD ("Game" screen) can be left invisible three ways: (1) the hatch renderer disabled it for a reveal and never
+-- finished (TS2HatchHudHidden stays on the screen, and ScreenHide then refuses to restore it), (2) HUD slots were slid
+-- off screen for a reason (Menu / Cutscene / Craft) that was never cleared, (3) a ScreenHide hold was never released.
+-- This checks every second and repairs what has been stuck for a few seconds, without touching menus the game has open.
+local HatchRenderer
+pcall(function() HatchRenderer = require(ReplicatedStorage.Modules.Client.Pets.HatchRenderer) end)
+local function HudReasonsAndSlots()
+    local set = RealSetHudHidden or (HudController and HudController.SetHudHidden)
+    if not set then return nil, nil end
+    local reasons, slots
+    for _, v in pairs(Upvalues(set)) do
+        if type(v) == "table" then
+            local k, x = next(v)
+            if k == nil then
+                reasons = reasons or v -- empty: could be either; prefer it as the reason table when nothing else fits
+            elseif type(k) == "string" and x == true then
+                reasons = v
+            elseif typeof(k) == "Instance" and type(x) == "table" and x.hidden ~= nil then
+                slots = v
+            end
+        end
+    end
+    return reasons, slots
+end
+task.spawn(function()
+    local disabledSince, slotsSince = nil, nil
+    while not Killed do
+        task.wait(1)
+        pcall(function()
+            local pg = LocalPlayer:FindFirstChild("PlayerGui")
+            local gameGui = pg and pg:FindFirstChild("Game")
+            if not gameGui then return end
+            local playing = false
+            pcall(function() playing = HatchRenderer and HatchRenderer:IsPlaying() == true end)
+            local held = false
+            pcall(function() held = ScreenHide and ScreenHide.IsActive() == true end)
+            -- (1) the HUD screen itself is off
+            if not gameGui.Enabled and not playing and not held and not Hiding then
+                disabledSince = disabledSince or os.clock()
+                if os.clock() - disabledSince >= 3 then
+                    pcall(function() if HatchRenderer and HatchRenderer.FlushHudRestore then HatchRenderer:FlushHudRestore() end end)
+                    gameGui:SetAttribute("TS2HatchHudHidden", nil)
+                    gameGui.Enabled = true
+                    warn("[UI] the HUD screen was left disabled (stale hatch reveal) -> enabled it again")
+                    disabledSince = nil
+                end
+            else
+                disabledSince = nil
+            end
+            -- (2) HUD slots slid off screen while no reason is left
+            if Hiding then slotsSince = nil return end
+            local reasons, slots = HudReasonsAndSlots()
+            if reasons and next(reasons) == nil then
+                local stuck = false
+                if slots then for _, v in pairs(slots) do if v.hidden then stuck = true break end end end
+                if gameGui:GetAttribute("TS2HudHidden") == true then stuck = true end
+                if stuck then
+                    slotsSince = slotsSince or os.clock()
+                    if os.clock() - slotsSince >= 3 then
+                        if slots then
+                            for obj, v in pairs(slots) do
+                                if v.hidden then
+                                    v.hidden = false
+                                    if v.tween then pcall(function() v.tween:Cancel() end) end
+                                    if type(v.home) == "table" and v.home.Position then pcall(function() obj.Position = v.home.Position end) end
+                                end
+                            end
+                        end
+                        gameGui:SetAttribute("TS2HudHidden", false)
+                        gameGui:SetAttribute("TS2MenuHudHidden", false)
+                        warn("[UI] HUD slots were left off screen with no reason -> moved them back")
+                        slotsSince = nil
+                    end
+                else
+                    slotsSince = nil
+                end
+            else
+                slotsSince = nil
+            end
+        end)
+    end
+end)
 
 local HideGen = 0
 local function StartHiding()
