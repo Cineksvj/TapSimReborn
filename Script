@@ -1618,9 +1618,11 @@ local function IslandUnlocked(data, island)
     return type(p) == "table" and type(p.UnlockedIslands) == "table" and p.UnlockedIslands[island] == true
 end
 
+local TravelTo
+do
 local LastTravelAt = 0
 local TRAVEL_GAP = 3 -- the server refuses island travels that come faster than this ("too fast")
-local function TravelTo(island)
+TravelTo = function(island)
     if island == nil or CurrentIsland() == island then return true end
     Status("travelling to " .. island .. " (now on " .. tostring(CurrentIsland()) .. ")")
     local travel = RF("IslandService", "Travel")
@@ -1657,6 +1659,7 @@ local function TravelTo(island)
     end
     Status("travel to " .. island .. " failed: " .. Dump(r) .. " (still on " .. tostring(CurrentIsland()) .. ")")
     return false
+end
 end
 
 -- waits for something to show up after a teleport (streaming); finder() returns the object or nil
@@ -1794,13 +1797,15 @@ local function MachineTarget(pointName)
     return Vector3.new(pos.X, y, pos.Z)
 end
 
+local TeleportTo
+do
 local GroundParams = RaycastParams.new()
 GroundParams.FilterType = Enum.RaycastFilterType.Exclude
 local function HasGround(pos)
     GroundParams.FilterDescendantsInstances = { LocalPlayer.Character }
     return workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -60, 0), GroundParams) ~= nil
 end
-local function TeleportTo(pos, settle)
+TeleportTo = function(pos, settle)
     local hrp = GetHrp()
     if not hrp then return false end
     local wasAnchored = hrp.Anchored
@@ -1815,6 +1820,7 @@ local function TeleportTo(pos, settle)
     if not wasAnchored then hrp.Anchored = false end
     task.wait(settle or 0.3)
     return true
+end
 end
 
 -- the machines sit on different islands: travel to the right one (learned once), then stand on the circle
@@ -2526,9 +2532,12 @@ end)
 local IslandBreakableConfig = Req({ "Shared", "Game", "IslandBreakableConfig" })
 local SPOT_ORDER = { "ShadowRelm", "CrystalCave", "Mushroom", "Desert", "Autumn", "SkyIsland" } -- Void Crystal first
 -- a target that did not work out is left alone for a while, so a trip can never loop between two islands
+local Skipped, Skip
+do
 local SkipUntil = {}
-local function Skipped(key) return (SkipUntil[key] or 0) > os.clock() end
-local function Skip(key, seconds, why) SkipUntil[key] = os.clock() + seconds if why then warn("[Trip] " .. key .. ": " .. why .. " -> next try in " .. math.floor(seconds / 60) .. " min") end end
+Skipped = function(key) return (SkipUntil[key] or 0) > os.clock() end
+Skip = function(key, seconds, why) SkipUntil[key] = os.clock() + seconds if why then warn("[Trip] " .. key .. ": " .. why .. " -> next try in " .. math.floor(seconds / 60) .. " min") end end
+end
 
 local function SpotCfg(id)
     local spots = IslandBreakableConfig and IslandBreakableConfig.Spots
@@ -2866,6 +2875,8 @@ end
 
 -- follow mode for flying targets: the character is anchored (no falling) and glides a little behind / below the
 -- target every frame until StopFollow(); the first jump there is still a teleport
+local Follow, StopFollow, FollowingNow
+do
 local Following = nil
 RunService.Heartbeat:Connect(function()
     if not Following or Killed then return end
@@ -2879,11 +2890,13 @@ RunService.Heartbeat:Connect(function()
     local goal = CFrame.lookAt(pos + Following.offset, pos)
     hrp.CFrame = hrp.CFrame:Lerp(goal, 0.3)
 end)
-local function Follow(get, offset) Following = { get = get, offset = offset or Vector3.new(0, -10, 6) } end
-local function StopFollow()
+FollowingNow = function() return Following ~= nil end
+Follow = function(get, offset) Following = { get = get, offset = offset or Vector3.new(0, -10, 6) } end
+StopFollow = function()
     Following = nil
     local hrp = GetHrp()
     if hrp then hrp.Anchored = false hrp.AssemblyLinearVelocity = Vector3.zero end
+end
 end
 
 local function EventWork(alive)
@@ -2915,7 +2928,7 @@ local function EventWork(alive)
                 pcall(function() pos = BalloonFlight.Position(b, t) end)
                 if not pos then break end
                 hrp = GetHrp() or hrp
-                if not Following then
+                if not FollowingNow() then
                     if (pos - hrp.Position).Magnitude > 110 then TeleportTo(pos - Vector3.new(0, 10, 0), 0.05) end
                     Follow(function() return BalloonFlight.Position(b, Now() - (b.LaunchedAt or Now())) end, Vector3.new(0, -10, 7))
                 end
@@ -2943,7 +2956,7 @@ local function EventWork(alive)
                 pcall(function() pos = PigFlight.CFrame(p, t).Position end)
                 if not pos then break end
                 hrp = GetHrp() or hrp
-                if not Following then
+                if not FollowingNow() then
                     if (pos - hrp.Position).Magnitude > 100 then TeleportTo(pos - Vector3.new(0, 8, 0), 0.05) end
                     Follow(function() return PigFlight.CFrame(p, Now() - (p.LaunchedAt or Now())).Position end, Vector3.new(0, -8, 7))
                 end
@@ -2997,11 +3010,10 @@ end)
 local Opponents, ColRunning, ColBusy = {}, false, false
 local PetDefToggle -- the switch of this feature (looked up after it is created)
 local function PetDefOn() return ColBusy or (PetDefToggle ~= nil and PetDefToggle.Value == true) end
-local ColGuis = { "WaveDefense", "WaveStartMessage", "ColosseumRewards" }
 local function HideColosseumGuis()
     local pg = LocalPlayer:FindFirstChild("PlayerGui")
     if not pg then return end
-    for _, name in ipairs(ColGuis) do
+    for _, name in ipairs({ "WaveDefense", "WaveStartMessage", "ColosseumRewards" }) do
         local g = pg:FindFirstChild(name)
         if g and g:IsA("ScreenGui") and g.Enabled then g.Enabled = false end
         if g and name == "WaveDefense" then local hud = g:FindFirstChild("WaveHUD") if hud then hud.Visible = false end end
@@ -3049,6 +3061,8 @@ task.spawn(function()
 end)
 
 -- rings: Bronze < Silver < Gold < Platinum < Diamond; same ring -> the one with the better boosts
+local ClaimRelic
+do
 local RING_TIER = { BronzeRing = 1, SilverRing = 2, GoldRing = 3, PlatinumRing = 4, DiamondRing = 5 }
 local BOOST_WEIGHT = { ClickMultiplier = 1, HatchSpeed = 1.2, CriticalChance = 2, RebirthMultiplier = 2, SecretLuck = 4, Walkspeed = 0.1 }
 local function RingScore(r)
@@ -3062,7 +3076,7 @@ local function RingScore(r)
 end
 local function RingLabel(r) return type(r) == "table" and tostring(r.Name) or "none" end
 -- claims a pending relic reward: replace when the new ring scores higher, keep otherwise; returns true when one was handled
-local function ClaimRelic()
+ClaimRelic = function()
     local data = GetData()
     local col = data and data.Colosseum or {}
     local pending = col.PendingReward
@@ -3073,6 +3087,7 @@ local function ClaimRelic()
     print(string.format("[PetDefense] relic %s: new %s (%d) vs current %s (%d) -> %s", replace and "REPLACED" or "kept", RingLabel(new), math.floor(RingScore(new)), RingLabel(old), math.floor(RingScore(old)), Dump(r)))
     Status(string.format("PetDefense: %s %s (%s)", replace and "equipped" or "kept old ring, rejected", RingLabel(new), replace and "better" or "not better"))
     return true
+end
 end
 
 LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
