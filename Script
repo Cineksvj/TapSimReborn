@@ -2450,6 +2450,10 @@ end)
 -- attribute per spot) and it is off cooldown (Data.IslandBreakables[spot] = ready time). It hops away when hit.
 local IslandBreakableConfig = Req({ "Shared", "Game", "IslandBreakableConfig" })
 local SPOT_ORDER = { "ShadowRelm", "CrystalCave", "Mushroom", "Desert", "Autumn", "SkyIsland" } -- Void Crystal first
+-- a target that did not work out is left alone for a while, so a trip can never loop between two islands
+local SkipUntil = {}
+local function Skipped(key) return (SkipUntil[key] or 0) > os.clock() end
+local function Skip(key, seconds, why) SkipUntil[key] = os.clock() + seconds if why then warn("[Trip] " .. key .. ": " .. why .. " -> next try in " .. math.floor(seconds / 60) .. " min") end end
 
 local function SpotCfg(id)
     local spots = IslandBreakableConfig and IslandBreakableConfig.Spots
@@ -2509,14 +2513,15 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
             pcall(function() unlocked = IslandBreakableConfig.IsUnlocked(data, cfg) end)
             local ready = 0
             pcall(function() ready = IslandBreakableConfig.GetReadyAt(data, id) end)
-            if unlocked and (ready or 0) <= Now() then
+            if unlocked and (ready or 0) <= Now() and not Skipped("breakable:" .. id) then
                 anyReady = true
                 Trip("breakable", function()
+                    Skip("breakable:" .. id, 300) -- cleared below when it worked
                     if not TravelTo(cfg.Island) then return end
                     local sf = WaitFor(function() return workspace:FindFirstChild("IslandBreakableSpots") end, 10)
                     pos = (sf and sf:GetAttribute(id)) or pos
-                    if typeof(pos) ~= "Vector3" then warn("[Breakable] " .. id .. ": spot position not published yet") return end
-                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.3)
+                    if typeof(pos) ~= "Vector3" then Skip("breakable:" .. id, 300, "spot position not published yet") return end
+                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.5)
                     local m
                     for _ = 1, 40 do -- the server spawns your instance once you are near the spot
                         m = FindBreakable(function(t) return t == cfg.Type end)
@@ -2524,10 +2529,15 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
                         task.wait(0.25)
                     end
                     if m then
-                        if BreakIt(m, alive) then print("[Breakable] broke " .. tostring(m:GetAttribute("BreakableTitle") or id)) end
+                        if BreakIt(m, alive) then
+                            print("[Breakable] broke " .. tostring(m:GetAttribute("BreakableTitle") or id))
+                            Skip("breakable:" .. id, 90) -- the data needs a moment to show the new cooldown
+                        else
+                            Skip("breakable:" .. id, 300, "could not break it")
+                        end
                         task.wait(1.5)
                     else
-                        warn("[Breakable] " .. id .. ": no breakable appeared (island locked or still on cooldown?)")
+                        Skip("breakable:" .. id, 300, "no breakable appeared (island locked or still on cooldown?)")
                     end
                 end)
             end
@@ -2623,21 +2633,24 @@ LoopToggle("Auto Open Chests", 15, function(alive)
         if not alive() then return end
         local readyAt = 0
         pcall(function() readyAt = TapChestConfig.GetReadyAt(data, chest.Id) end)
-        if (readyAt or 0) - Now() <= 0 then
+        if (readyAt or 0) - Now() <= 0 and not Skipped("chest:" .. chest.Id) then
             Trip("chest", function()
+                Skip("chest:" .. chest.Id, 300)
                 if not TravelTo(chest.Island) then return end
                 local m = WaitFor(function()
                     for _, c in ipairs(CollectionService:GetTagged("TapChest")) do
                         if c:GetAttribute("TapChestId") == chest.Id then return c end
                     end
                 end, 10)
-                if not m then warn("[Chest] " .. chest.Id .. ": chest model not found on " .. chest.Island) return end
+                if not m then Skip("chest:" .. chest.Id, 300, "chest model not found on " .. chest.Island) return end
                 local front, size = m:GetAttribute("TapChestFront"), m:GetAttribute("TapChestSize")
                 local anchor = typeof(front) == "CFrame" and (front.Position - Vector3.new(0, (typeof(size) == "Vector3" and size.Y or 4) / 2, 0)) or m:GetPivot().Position
                 local look = typeof(front) == "CFrame" and front.LookVector or Vector3.new(0, 0, 1)
-                TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.35)
+                TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.6)
                 local r = Invoke(RF("TapChestService", "Claim"), chest.Id)
                 print("[Chest] " .. chest.Id .. ": " .. Dump(r))
+                if type(r) == "table" and (r.Success or r.Claimed) then Skip("chest:" .. chest.Id, 120)
+                else Skip("chest:" .. chest.Id, 300, "claim failed: " .. Dump(r)) end
                 task.wait(0.5)
             end)
         end
