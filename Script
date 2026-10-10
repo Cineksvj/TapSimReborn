@@ -1802,7 +1802,7 @@ pcall(function()
         local key = reason or "Gameplay"
         if Hiding and hidden then
             HudReasons[key] = true
-            return
+            return -- crafting screens may not take the HUD away
         end
         if not hidden then HudReasons[key] = nil end
         return RealSetHudHidden(self, hidden, reason, ...)
@@ -1918,60 +1918,43 @@ local function HudReasonsAndSlots()
     end
     return reasons, slots
 end
+-- The HUD is kept visible at all times: the Game screen is marked "keep" for ScreenHide (so holds never disable
+-- it), re-enabled the moment anything turns it off, and its slots are put back unless the game has a menu open.
 task.spawn(function()
-    local disabledSince, slotsSince = nil, nil
+    local lastWarn = 0
     while not Killed do
-        task.wait(1)
+        task.wait(0.25)
         pcall(function()
             local pg = LocalPlayer:FindFirstChild("PlayerGui")
             local gameGui = pg and pg:FindFirstChild("Game")
             if not gameGui then return end
-            local playing = false
-            pcall(function() playing = HatchRenderer and HatchRenderer:IsPlaying() == true end)
-            local held = false
-            pcall(function() held = ScreenHide and ScreenHide.IsActive() == true end)
-            -- (1) the HUD screen itself is off
-            if not gameGui.Enabled and not playing and not held and not Hiding then
-                disabledSince = disabledSince or os.clock()
-                if os.clock() - disabledSince >= 3 then
-                    pcall(function() if HatchRenderer and HatchRenderer.FlushHudRestore then HatchRenderer:FlushHudRestore() end end)
-                    gameGui:SetAttribute("TS2HatchHudHidden", nil)
-                    gameGui.Enabled = true
-                    warn("[UI] the HUD screen was left disabled (stale hatch reveal) -> enabled it again")
-                    disabledSince = nil
-                end
-            else
-                disabledSince = nil
+            if gameGui:GetAttribute("TS2ScreenHideKeep") ~= true then gameGui:SetAttribute("TS2ScreenHideKeep", true) end
+            -- (1) the HUD screen itself is off: back on at once
+            if not gameGui.Enabled then
+                pcall(function() if HatchRenderer and HatchRenderer.FlushHudRestore then HatchRenderer:FlushHudRestore() end end)
+                gameGui:SetAttribute("TS2HatchHudHidden", nil)
+                gameGui.Enabled = true
+                if os.clock() - lastWarn > 10 then lastWarn = os.clock() warn("[UI] the HUD screen was turned off -> enabled it again") end
             end
-            -- (2) HUD slots slid off screen while no reason is left
-            if Hiding then slotsSince = nil return end
+            -- (2) HUD slots slid off screen: every reason but an open game menu is cleared, then the slots come back
             local reasons, slots = HudReasonsAndSlots()
-            if reasons and next(reasons) == nil then
-                local stuck = false
-                if slots then for _, v in pairs(slots) do if v.hidden then stuck = true break end end end
-                if gameGui:GetAttribute("TS2HudHidden") == true then stuck = true end
-                if stuck then
-                    slotsSince = slotsSince or os.clock()
-                    if os.clock() - slotsSince >= 3 then
-                        if slots then
-                            for obj, v in pairs(slots) do
-                                if v.hidden then
-                                    v.hidden = false
-                                    if v.tween then pcall(function() v.tween:Cancel() end) end
-                                    if type(v.home) == "table" and v.home.Position then pcall(function() obj.Position = v.home.Position end) end
-                                end
-                            end
+            if not reasons then return end
+            local set = RealSetHudHidden or (HudController and HudController.SetHudHidden)
+            for k in pairs(reasons) do
+                if k ~= "Menu" and set then pcall(set, HudController, false, k) end
+            end
+            if next(reasons) == nil then
+                if slots then
+                    for obj, v in pairs(slots) do
+                        if v.hidden then
+                            v.hidden = false
+                            if v.tween then pcall(function() v.tween:Cancel() end) end
+                            if type(v.home) == "table" and v.home.Position then pcall(function() obj.Position = v.home.Position end) end
                         end
-                        gameGui:SetAttribute("TS2HudHidden", false)
-                        gameGui:SetAttribute("TS2MenuHudHidden", false)
-                        warn("[UI] HUD slots were left off screen with no reason -> moved them back")
-                        slotsSince = nil
                     end
-                else
-                    slotsSince = nil
                 end
-            else
-                slotsSince = nil
+                if gameGui:GetAttribute("TS2HudHidden") == true then gameGui:SetAttribute("TS2HudHidden", false) end
+                if gameGui:GetAttribute("TS2MenuHudHidden") == true then gameGui:SetAttribute("TS2MenuHudHidden", false) end
             end
         end)
     end
