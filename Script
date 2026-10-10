@@ -1612,7 +1612,11 @@ local function TravelTo(island)
         if CurrentIsland() == island then
             Status("arrived on " .. island .. ", waiting for it to load")
             local t0 = os.clock()
-            repeat task.wait(0.1) until os.clock() - t0 > 0.4 and (Island(island) ~= nil or os.clock() - t0 > 1.5)
+            repeat
+                task.wait(0.1)
+                local f = Island(island)
+                local loaded = f ~= nil and #f:GetDescendants() > 150
+            until (loaded and os.clock() - t0 > 0.5) or os.clock() - t0 > 3
             return true
         end
         task.wait(0.1)
@@ -1756,14 +1760,25 @@ local function MachineTarget(pointName)
     return Vector3.new(pos.X, y, pos.Z)
 end
 
+local GroundParams = RaycastParams.new()
+GroundParams.FilterType = Enum.RaycastFilterType.Exclude
+local function HasGround(pos)
+    GroundParams.FilterDescendantsInstances = { LocalPlayer.Character }
+    return workspace:Raycast(pos + Vector3.new(0, 2, 0), Vector3.new(0, -60, 0), GroundParams) ~= nil
+end
 local function TeleportTo(pos, settle)
     local hrp = GetHrp()
     if not hrp then return false end
+    local wasAnchored = hrp.Anchored
+    hrp.Anchored = true -- no falling while the island streams in under the new spot
     hrp.AssemblyLinearVelocity = Vector3.zero
     hrp.CFrame = CFrame.new(pos)
     RunService.Heartbeat:Wait()
     hrp.AssemblyLinearVelocity = Vector3.zero
     hrp.CFrame = CFrame.new(pos)
+    local t0 = os.clock()
+    while not HasGround(pos) and os.clock() - t0 < 3 do task.wait(0.1) end
+    if not wasAnchored then hrp.Anchored = false end
     task.wait(settle or 0.3)
     return true
 end
@@ -2425,6 +2440,30 @@ local function GoToEgg()
     return true
 end
 
+local LastHatchOk = os.clock()
+if EggResultEvent then EggResultEvent.OnClientEvent:Connect(function(r) if type(r) == "table" and r.Success == true then LastHatchOk = os.clock() end end) end
+task.spawn(function()
+    local holdSince = nil
+    while not Killed do
+        task.wait(5)
+        if not EggWanted then LastHatchOk = os.clock() holdSince = nil else
+            -- a hold with no trip behind it for 60 s is a leak: drop it
+            if EggHolds > 0 and BusyBy == nil then
+                holdSince = holdSince or os.clock()
+                if os.clock() - holdSince > 60 then warn("[Egg] a stale egg hold was dropped") EggHolds = 0 holdSince = nil end
+            else
+                holdSince = nil
+            end
+            if os.clock() - LastHatchOk > 20 then
+                local n, limit = Storage()
+                local pending = 0
+                for _ in pairs(Pending) do pending += 1 end
+                Status(string.format("egg idle %ds: busy=%s holds=%d next=%d free=%d storage=%s/%s inflight=%d toofar=%s island=%s",
+                    math.floor(os.clock() - LastHatchOk), tostring(BusyBy), EggHolds, NextCount(), FreeSlots(), tostring(n), tostring(limit), pending, tostring(EggTooFar), tostring(CurrentIsland())))
+            end
+        end
+    end
+end)
 task.spawn(function()
     while not Killed do
         task.wait(1)
