@@ -2662,40 +2662,62 @@ local function EventWork(alive)
     local hrp = GetHrp()
     if not hrp then return false end
     local did = false
-    -- balloons: RE.Hit:FireServer(uid) within HitRange 150
+    -- balloons: RE.Hit:FireServer(uid) within HitRange 150, HitCooldown 0.1 s, up to 10 hits each (Giant / Golden more).
+    -- One balloon at a time: stand in range once, then hit it until it pops (the Popped event removes it), then the next.
     local hitB = RE("BalloonPartyService", "Hit")
-    for uid, b in pairs(Balloons) do
-        if not alive() then return did end
-        local t = now - (b.LaunchedAt or now)
-        if BalloonFlight and t >= (BalloonFlight.Lifetime or 25) then
-            Balloons[uid] = nil
-        elseif hitB and BalloonFlight then
-            local pos
-            pcall(function() pos = BalloonFlight.Position(b, t) end)
-            if pos then
-                if (pos - hrp.Position).Magnitude > 120 then TeleportTo(pos - Vector3.new(0, 10, 0), 0.15) hrp = GetHrp() or hrp end
+    local function oldest(store, lifetime)
+        local best, bestT
+        for uid, e in pairs(store) do
+            local t = now - (e.LaunchedAt or now)
+            if t >= lifetime then store[uid] = nil
+            elseif not best or t > bestT then best, bestT = e, t end
+        end
+        return best
+    end
+    if hitB and BalloonFlight then
+        local b = oldest(Balloons, BalloonFlight.Lifetime or 25)
+        if b then
+            local uid, hits, t0 = b.Uid, 0, os.clock()
+            Status("events: popping a balloon")
+            while alive() and Balloons[uid] and hits < 40 and os.clock() - t0 < 12 do
+                local t = Now() - (b.LaunchedAt or Now())
+                if t >= (BalloonFlight.Lifetime or 25) then Balloons[uid] = nil break end
+                local pos
+                pcall(function() pos = BalloonFlight.Position(b, t) end)
+                if not pos then break end
+                hrp = GetHrp() or hrp
+                if (pos - hrp.Position).Magnitude > 110 then TeleportTo(pos - Vector3.new(0, 12, 0), 0.1) end
                 hitB:FireServer(uid)
+                hits += 1
                 did = true
-                task.wait(0.11)
+                task.wait(0.12)
             end
+            if Balloons[uid] == nil then print("[Events] balloon popped after " .. hits .. " hits") end
+            return did
         end
     end
-    -- pigs: RE.Hit:FireServer(uid) within 120, max every 0.5 s per pig
+    -- pigs: RE.Hit:FireServer(uid) within 150, one hit every 0.5 s per pig, up to 10 hits: same, one pig at a time
     local hitP = RE("PigsCouldFlyService", "Hit")
-    for uid, p in pairs(Pigs) do
-        if not alive() then return did end
-        local t = now - (p.LaunchedAt or now)
-        if PigFlight and t >= (PigFlight.Lifetime or 60) then
-            Pigs[uid] = nil
-        elseif hitP and PigFlight and now - (p._last or 0) >= 0.5 then
-            local pos
-            pcall(function() pos = PigFlight.CFrame(p, t).Position end)
-            if pos then
-                if (pos - hrp.Position).Magnitude > 100 then TeleportTo(pos - Vector3.new(0, 8, 0), 0.15) hrp = GetHrp() or hrp end
-                p._last = now
+    if hitP and PigFlight then
+        local p = oldest(Pigs, PigFlight.Lifetime or 45)
+        if p then
+            local uid, hits, t0 = p.Uid, 0, os.clock()
+            Status("events: catching a pig")
+            while alive() and Pigs[uid] and hits < 25 and os.clock() - t0 < 20 do
+                local t = Now() - (p.LaunchedAt or Now())
+                if t >= (PigFlight.Lifetime or 45) then Pigs[uid] = nil break end
+                local pos
+                pcall(function() pos = PigFlight.CFrame(p, t).Position end)
+                if not pos then break end
+                hrp = GetHrp() or hrp
+                if (pos - hrp.Position).Magnitude > 100 then TeleportTo(pos - Vector3.new(0, 8, 0), 0.1) end
                 hitP:FireServer(uid)
+                hits += 1
                 did = true
+                task.wait(0.52)
             end
+            if Pigs[uid] == nil then print("[Events] pig caught after " .. hits .. " hits") end
+            return did
         end
     end
     -- lucky blocks: RE.CollectRequested:FireServer(model.Name) within Scale * 7 studs
