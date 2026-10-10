@@ -1317,6 +1317,7 @@ end
 -- slots (0 = storage is full). ServerFull is set when the server answers StorageFull anyway (its own count differs).
 local ServerFullAt = 0
 local function NextCount()
+    if Storage() == nil then return HatchCount() end -- pet data not readable: hatch the usual way, the server decides
     local free = FreeSlots()
     if free < 1 then return 0 end
     local top = HatchCount()
@@ -2404,7 +2405,8 @@ local function Trip(who, body)
     local ok, err = pcall(body)
     if not ok then warn("[" .. who .. "] " .. tostring(err)) Status(who .. " error: " .. tostring(err)) end
     Status(who .. ": going back to " .. tostring(homeIsland))
-    GoHome(homeIsland, home)
+    local okHome, errHome = pcall(GoHome, homeIsland, home)
+    if not okHome then warn("[" .. who .. "] going home failed: " .. tostring(errHome)) end
     HoldEgg(false)
     Release(who)
     Status(who .. ": done")
@@ -2472,6 +2474,7 @@ task.spawn(function()
             local hrp = GetHrp()
             local far = EggTooFar or CurrentIsland() ~= EggIsland() or not m
                 or (hrp and (hrp.Position - EggStandPos(m)).Magnitude > 25)
+            if far then print(string.format("[Egg] keeper: toofar=%s island=%s/%s egg=%s dist=%s", tostring(EggTooFar), tostring(CurrentIsland()), tostring(EggIsland()), tostring(m ~= nil), m and hrp and string.format("%.0f", (hrp.Position - EggStandPos(m)).Magnitude) or "?")) end
             if far and Acquire("egg", 5) then
                 HoldEgg(true)
                 pcall(GoToEgg)
