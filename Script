@@ -1672,6 +1672,14 @@ local function Full()
     local n, limit = Storage()
     return n ~= nil and limit - n < HatchCount()
 end
+-- pets that sit in complete sets right now (6 same Normals, 5 same Goldens, 5 same Diamonds): craftable at once
+local function Craftable()
+    local n = 0
+    for _, ids in pairs(GetGroups("Normal") or {}) do n += math.floor(#ids / 6) * 6 end
+    for _, ids in pairs(GetGroups("Golden") or {}) do n += math.floor(#ids / 5) * 5 end
+    for _, ids in pairs(GetGroups("Diamond") or {}) do n += math.floor(#ids / 5) * 5 end
+    return n
+end
 -- storage completely full: not even one egg fits any more (or the server just said so)
 local function Saturated()
     local n, limit = Storage()
@@ -2221,7 +2229,12 @@ Main:CreateToggle({
                 local n, limit = Storage()
                 local worth = math.max(HatchCount() * 2, math.floor((limit or 150) * 0.08)) -- ~12 slots on a 150 storage
                 local pods = (function() local ready, total = RainbowReadyIds() return #ready end)()
-                if Full() and (Saturated() or freeable >= worth or pods > 0) then
+                -- half (or more) of the storage is pets sitting in complete sets: craft every one of them now,
+                -- Golden first, then Diamond, then Rainbow pods, whatever the free space
+                local craftable = Craftable()
+                local halfFull = (n or 0) > 0 and craftable >= (n or 0) * 0.5
+                if halfFull then Status(string.format("storage %d/%d: %d pets in complete sets (%d%%), crafting them all", n or 0, limit or 0, craftable, math.floor(craftable / n * 100))) end
+                if halfFull or (Full() and (Saturated() or freeable >= worth or pods > 0)) then
                     if not held then HoldEgg(true) held = true end
                     task.wait(1.2) -- let hatches in flight land
                     freeable = Freeable()
@@ -2240,7 +2253,7 @@ Main:CreateToggle({
                             task.wait(20)
                         end
                     end
-                    if not (my == CraftToken and (Saturated() or freeable >= worth or pods > 0)) then
+                    if not (my == CraftToken and (halfFull or Saturated() or freeable >= worth or pods > 0)) then
                         -- room was made without a trip, or a trip is not worth it: keep hatching smaller counts
                         if held then HoldEgg(false) held = false end
                         task.wait(2)
