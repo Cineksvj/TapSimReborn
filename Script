@@ -392,6 +392,7 @@ local DEFAULTS = { -- first start: these are ON
     ["Auto Breakables (Void Crystal, clusters, mushrooms...)"] = true, ["Auto Dig Site"] = true, ["Auto Open Chests"] = true,
     ["Auto Shrine (Golden blessing)"] = true, ["Auto Click Lucky Duck"] = true,
     ["Auto Events (balloons, pigs, lucky blocks, meteors)"] = true, ["Auto Pet Defense (bone pit)"] = true,
+    ["Delete junk when storage is saturated (Common/Rare normals)"] = true,
 }
 pcall(function()
     if isfile and readfile and isfile(ConfigFile) then
@@ -648,6 +649,8 @@ end)
 local function IsHatchGui(obj)
     if not obj:IsA("ScreenGui") then return false end
     local n = string.lower(obj.Name)
+    -- never touch cutscene screens: destroying them leaves the game's ScreenHide hold active = whole UI gone
+    if string.find(n, "secret") or string.find(n, "cutscene") or string.find(n, "layer") then return false end
     return string.find(n, "hatch") or string.find(n, "reveal") or string.find(n, "opening")
 end
 pcall(function()
@@ -1028,6 +1031,61 @@ pcall(function()
     end
 end)
 
+-- upvalues of a game function (executor debug library), or {} when not available
+local function Upvalues(f)
+    local ok, t = pcall(function() return debug.getupvalues(f) end)
+    if ok and type(t) == "table" then return t end
+    local out = {}
+    pcall(function()
+        for i = 1, 60 do
+            local n, v = debug.getupvalue(f, i)
+            if n == nil then break end
+            out[i] = v
+        end
+    end)
+    return out
+end
+
+-- ScreenHide (Modules.Client.Common.ScreenHide) disables EVERY ScreenGui while a "hold" is active and re-disables
+-- them when something turns them back on. A hold that is never released = the whole UI gone. This clears the
+-- hold table and lets the module's own restore run (Hold() + release with an empty table calls restoreAll).
+local ScreenHide
+pcall(function() ScreenHide = require(ReplicatedStorage.Modules.Client.Common.ScreenHide) end)
+local function ReleaseScreenHide()
+    if not (ScreenHide and type(ScreenHide.IsActive) == "function" and ScreenHide.IsActive()) then return false end
+    local holds
+    for _, v in pairs(Upvalues(ScreenHide.Hold)) do
+        if type(v) == "table" then
+            for k, x in pairs(v) do
+                if type(k) == "string" and type(x) == "table" and x.HideNew ~= nil then holds = v break end
+            end
+        end
+        if holds then break end
+    end
+    if not holds then warn("[UI] ScreenHide is active but its hold table was not found (no debug.getupvalues?)") return false end
+    local names = {}
+    for k in pairs(holds) do table.insert(names, k) holds[k] = nil end
+    local ok, release = pcall(ScreenHide.Hold, "CorvusRestore")
+    if ok and type(release) == "function" then pcall(release) end
+    warn("[UI] released stale screen hides: " .. table.concat(names, ", "))
+    return true
+end
+-- watchdog: a screen hide that lasts more than 20 s is stale (cutscenes take a few seconds)
+task.spawn(function()
+    local since
+    while not Killed do
+        task.wait(2)
+        local active = false
+        pcall(function() active = ScreenHide and ScreenHide.IsActive() end)
+        if active then
+            since = since or os.clock()
+            if os.clock() - since > 20 then ReleaseScreenHide() since = nil end
+        else
+            since = nil
+        end
+    end
+end)
+
 local function ShowHud()
     pcall(function()
         if not HudController then return end
@@ -1035,6 +1093,14 @@ local function ShowHud()
         HudReasons.Menu = true
         for reason in pairs(HudReasons) do pcall(set, HudController, false, reason) end
         HudReasons = {}
+        -- reasons set through a cached reference never reach the wrapper: read the controller's own reason table
+        for _, v in pairs(Upvalues(set)) do
+            if type(v) == "table" then
+                local plain, any = true, false
+                for k, x in pairs(v) do any = true if type(k) ~= "string" or x ~= true then plain = false break end end
+                if plain and any then for k in pairs(v) do pcall(set, HudController, false, k) end end
+            end
+        end
     end)
     pcall(function()
         for _, g in ipairs(CollectionService:GetTagged("HideDuringCutscene")) do
@@ -1076,6 +1142,7 @@ local function StopHiding()
         Hiding = false
         closeAll()
         ShowHud()
+        ReleaseScreenHide()
         task.delay(1, function() if gen == HideGen then ShowHud() end end)
     end)
 end
@@ -1203,6 +1270,84 @@ local function CraftRainbow()
     return removed
 end
 
+-- ── storage planning ──
+-- A crafting trip costs ~20 s of hatching, so it is only worth it when it frees enough slots. Slots a trip would free:
+-- Golden sets (6 -> 1 = 5 slots), Diamond sets (5 -> 1 = 4), Rainbow pods (5 pets leave the storage).
+local function Freeable()
+    local n = 0
+    local g = GetGroups("Normal") or {}
+    for _, ids in pairs(g) do n += math.floor(#ids / 6) * 5 end
+    local d = GetGroups("Golden") or {}
+    for _, ids in pairs(d) do n += math.floor(#ids / 5) * 4 end
+    local ready, total = RainbowReadyIds()
+    local pods = RAINBOW.maxQueue - (total - #ready)
+    local r = GetGroups("Diamond") or {}
+    for _, ids in pairs(r) do
+        if pods <= 0 then break end
+        if #ids >= 5 then n += 5 pods = pods - 1 end
+    end
+    return n
+end
+
+-- Junk: Normal-tier pets of Common / Rare rarity whose name group cannot complete a Golden set (fewer than 6).
+-- They are the first to go when the storage is saturated, smallest groups first; Golden / Diamond / locked / equipped
+-- pets and rarer names are never touched. Deletion uses the game's own PetDeleteRequest (batched, rate-limited).
+local PetDeleteRequest = Req({ "Modules", "Client", "Pets", "PetDeleteRequest" })
+local OriginalPetCatalog = Req({ "Shared", "Pets", "OriginalPetCatalog" })
+local JUNK_RARITY = { Common = 1, Rare = 2 }
+local function RarityOf(name)
+    local c = OriginalPetCatalog and OriginalPetCatalog[name]
+    return (type(c) == "table" and c.Rarity) or "?"
+end
+local JunkCleanup = true
+
+local function DeleteIds(ids)
+    if #ids == 0 then return end
+    local ok = false
+    if PetDeleteRequest and type(PetDeleteRequest.Send) == "function" then
+        ok = pcall(PetDeleteRequest.Send, ids, true)
+    end
+    if not ok and PetEvent then
+        for i = 1, #ids, 100 do
+            PetEvent:FireServer({ Action = "Delete", PetIds = { table.unpack(ids, i, math.min(i + 99, #ids)) }, Batch = i })
+            task.wait(1.1)
+        end
+    end
+end
+
+-- frees slots until `target` are free; returns how many pets were deleted
+local function DeleteJunk(target)
+    local groups = GetGroups("Normal")
+    if not groups then return 0 end
+    local list = {}
+    for name, ids in pairs(groups) do
+        local rank = JUNK_RARITY[RarityOf(name)]
+        if rank and #ids < 6 then table.insert(list, { name = name, ids = ids, rank = rank }) end
+    end
+    table.sort(list, function(a, b) if a.rank ~= b.rank then return a.rank < b.rank end return #a.ids < #b.ids end)
+    local n, limit = Storage()
+    if not n then return 0 end
+    local need = target - (limit - n)
+    local todo = {}
+    for _, g in ipairs(list) do
+        if need <= 0 then break end
+        for _, id in ipairs(g.ids) do
+            if need <= 0 then break end
+            table.insert(todo, id)
+            need = need - 1
+        end
+    end
+    if #todo == 0 then return 0 end
+    Status(string.format("storage: deleting %d junk pets (Common/Rare normals that cannot make a set)", #todo))
+    DeleteIds(todo)
+    for _ = 1, 20 do -- wait for the data to catch up
+        task.wait(0.5)
+        local n2 = Storage()
+        if n2 and n2 <= n - #todo + 2 then break end
+    end
+    return #todo
+end
+
 local CraftToken = 0
 Main:CreateToggle({
     Name = "Auto Craft (Golden > Diamond > Rainbow)",
@@ -1218,7 +1363,25 @@ Main:CreateToggle({
                 if Full() then
                     if not held then HoldEgg(true) held = true end
                     task.wait(1.2) -- let hatches in flight land
-                    if not Acquire("craft") then
+                    local freeable = Freeable()
+                    local n, limit = Storage()
+                    local wantFree = math.max(HatchCount() * 4, math.floor((limit or 150) * 0.2))
+                    if freeable < 10 and JunkCleanup and Acquire("craft", 30) then
+                        -- a trip would free almost nothing: make room by deleting junk instead and keep hatching
+                        Status(string.format("storage %d/%d: a trip would free only %d slots, cleaning junk", n or 0, limit or 0, freeable))
+                        local deleted = DeleteJunk(wantFree)
+                        Release("craft")
+                        if deleted > 0 and not Full() then
+                            HoldEgg(false) held = false
+                            task.wait(1)
+                        elseif deleted == 0 and freeable == 0 then
+                            Status("storage saturated: nothing to craft and no junk to delete (lock fewer pets or buy storage)")
+                            task.wait(20)
+                        end
+                    end
+                    if not (my == CraftToken and Full()) then
+                        -- room was made without a trip
+                    elseif not Acquire("craft") then
                         task.wait(5)
                     elseif my ~= CraftToken then
                         Release("craft")
@@ -1236,11 +1399,15 @@ Main:CreateToggle({
                             if my == CraftToken and Full() then did += CraftRainbow() end
                         end)
                         if not okRun then warn("[Craft] " .. tostring(err)) Status("craft error: " .. tostring(err)) end
+                        -- still saturated after crafting everything: delete junk before going back to the egg
+                        if my == CraftToken and JunkCleanup and Full() then
+                            pcall(DeleteJunk, math.max(HatchCount() * 4, math.floor((Storage() and select(2, Storage()) or 150) * 0.2)))
+                        end
                         if my == CraftToken then pcall(GoHome, homeIsland, home) end
                         StopHiding()
                         Release("craft")
-                        if did == 0 or Full() then
-                            task.wait(did == 0 and 20 or 2) -- nothing crafted: wait longer so the egg is not held for nothing
+                        if Full() then
+                            task.wait(did == 0 and 20 or 2) -- nothing helped: wait, then re-check
                         elseif held then
                             HoldEgg(false) held = false
                         end
@@ -1254,6 +1421,12 @@ Main:CreateToggle({
             StopHiding()
         end)
     end,
+})
+
+Main:CreateToggle({
+    Name = "Delete junk when storage is saturated (Common/Rare normals)",
+    CurrentValue = false,
+    Callback = function(Value) JunkCleanup = Value end,
 })
 
 -- ═══════════ EXTRA FEATURES (dig site, chests, shrine, breakables, mining, pet defense, duck, events) ═══════════
