@@ -128,6 +128,7 @@ local EggWanted, EggConn = false, nil
 local EggHolds = 0 -- > 0 while a trip (crafting, digging, ...) keeps the egg paused
 local function HoldEgg(on) EggHolds = math.max(0, EggHolds + (on and 1 or -1)) end
 local Pending, NextSendAt = {}, 0 -- hatch requests waiting for the server answer: [Seq] = sent at
+local EggTooFar = false -- set when the server answers "TooFar": the egg keeper below walks you back to the egg
 
 local function FireHatch()
     if LastClientSeq > Seq then Seq = LastClientSeq end -- continue the game's own counter
@@ -148,6 +149,7 @@ if EggResultEvent then
         if r.Success == true or r.Forced == true then return end
         local wait = (r.Error == "RateLimited" and 0.4) or (r.Error == "Cancelled" and 0.1) or (r.Error == "StorageFull" and 1) or 2
         NextSendAt = os.clock() + wait
+        if r.Error == "TooFar" then EggTooFar = true end
         if r.Error ~= "RateLimited" and r.Error ~= "Cancelled" and r.Error ~= "StorageFull" then
             warn("[Egg] " .. tostring(r.Error))
         end
@@ -218,7 +220,11 @@ Main:CreateToggle({
 -- every feature that moves the character (crafting, digging, chests, mining, ...) takes this lock first
 local BusyBy = nil
 local function Acquire(who)
-    while BusyBy ~= nil and BusyBy ~= who do task.wait(0.2) end
+    local t0 = os.clock()
+    while BusyBy ~= nil and BusyBy ~= who do
+        if os.clock() - t0 > 5 then warn("[" .. who .. "] waiting: " .. tostring(BusyBy) .. " is still busy") t0 = os.clock() end
+        task.wait(0.2)
+    end
     BusyBy = who
 end
 local function Release(who)
@@ -279,6 +285,16 @@ end
 local ISLANDS = { "Spawn", "Sky Island", "Autumn", "Mushroom", "Desert", "Crystal Cave", "Shadow Realm" }
 local function CurrentIsland() return LocalPlayer:GetAttribute("CurrentIsland") end
 
+-- one status line in the GUI (and the console) so you can see what a feature is doing without F9
+local StatusLabel = Main:CreateLabel("Status: idle")
+local LastStatusText = ""
+local function Status(text)
+    if text == LastStatusText then return end
+    LastStatusText = text
+    print("[Status] " .. text)
+    pcall(function() StatusLabel:Set("Status: " .. text) end)
+end
+
 local function IslandUnlocked(data, island)
     if island == "Spawn" or island == nil then return true end
     local p = data and data.Progression
@@ -287,18 +303,23 @@ end
 
 local function TravelTo(island)
     if island == nil or CurrentIsland() == island then return true end
-    if not IslandUnlocked(GetData(), island) then warn("[Travel] " .. island .. " is not unlocked") return false end
+    Status("travelling to " .. island .. " (now on " .. tostring(CurrentIsland()) .. ")")
     local travel = RF("IslandService", "Travel")
+    if not travel then Status("IslandService.RF.Travel remote not found") return false end
     local r = Invoke(travel, { Island = island, Source = "Menu" })
     if island == "Spawn" and not (type(r) == "table" and r.Success) then
         r = Invoke(travel, { ReturnToSpawn = true, Source = "Menu" })
     end
     print("[Travel] -> " .. island .. ": " .. Dump(r))
     for _ = 1, 80 do
-        if CurrentIsland() == island then task.wait(2) return true end -- let the island stream in
+        if CurrentIsland() == island then
+            Status("arrived on " .. island .. ", waiting for it to load")
+            task.wait(2) -- let the island stream in
+            return true
+        end
         task.wait(0.25)
     end
-    warn("[Travel] never arrived on " .. island .. " (CurrentIsland = " .. tostring(CurrentIsland()) .. ")")
+    Status("travel to " .. island .. " failed: " .. Dump(r) .. " (still on " .. tostring(CurrentIsland()) .. ")")
     return false
 end
 
@@ -320,7 +341,11 @@ end
 
 -- looks for something that lives on an unknown island: checks the current island, then travels through the
 -- unlocked ones. finder() returns the object or nil. The island is cached under `key` once found.
-local KnownIsland = {}
+local KnownIsland = { -- where things are known to be; anything else is searched once and remembered
+    ["machine:Golden"] = "Shadow Realm",
+    ["machine:Diamond"] = "Crystal Cave",
+    ["machine:Rainbow"] = "Shadow Realm",
+}
 local function FindOnIslands(key, finder, timeoutEach)
     local obj = finder()
     if obj then KnownIsland[key] = CurrentIsland() return obj end
@@ -330,7 +355,8 @@ local function FindOnIslands(key, finder, timeoutEach)
     for _, n in ipairs(ISLANDS) do if n ~= cur and n ~= KnownIsland[key] then table.insert(order, n) end end
     local data = GetData()
     for _, island in ipairs(order) do
-        if IslandUnlocked(data, island) and TravelTo(island) then
+        if (island == KnownIsland[key] or IslandUnlocked(data, island)) and TravelTo(island) then
+            Status("looking for " .. key .. " on " .. island)
             obj = WaitFor(finder, timeoutEach or 6)
             if obj then KnownIsland[key] = island return obj end
         end
@@ -581,7 +607,9 @@ end
 -- crafts every complete set of one stage; returns how many went through
 local function CraftStage(stage)
     if not PickSet(stage) then return 0 end
+    Status("craft: going to the " .. stage.machine .. " machine")
     if not GoTo(stage.point) then return 0 end
+    Status("craft: " .. stage.machine)
     local crafted, fails = 0, 0
     while true do
         local use = PickSet(stage)
@@ -723,7 +751,7 @@ local function LoopToggle(name, every, fn)
                 local function alive() return my == token end
                 while alive() do
                     local ok, err = pcall(fn, alive)
-                    if not ok then warn("[" .. name .. "] " .. tostring(err)) end
+                    if not ok then warn("[" .. name .. "] " .. tostring(err)) Status(name .. " error: " .. tostring(err)) end
                     if alive() then task.wait(every) end
                 end
             end)
@@ -731,23 +759,79 @@ local function LoopToggle(name, every, fn)
     })
 end
 
--- a trip: lock + pause the egg + come back to where you were (island first, then the exact spot)
+-- a trip: lock + pause the egg + come back to where you were (island first, then the exact spot).
+-- While the egg opener is on, "home" is always the egg itself (see the egg keeper below).
+local EggHome = nil -- { island = ..., pos = Vector3 }
 local function GoHome(island, pos)
+    if EggWanted and EggHome then island, pos = EggHome.island, EggHome.pos end
     if island and CurrentIsland() ~= island then TravelTo(island) end
     if pos then TeleportTo(pos + Vector3.new(0, 1, 0), 0.4) end
 end
 
 local function Trip(who, body)
+    Status(who .. ": starting trip")
     Acquire(who)
     HoldEgg(true)
     local hrp = GetHrp()
     local home, homeIsland = hrp and hrp.Position, CurrentIsland()
     local ok, err = pcall(body)
-    if not ok then warn("[" .. who .. "] " .. tostring(err)) end
+    if not ok then warn("[" .. who .. "] " .. tostring(err)) Status(who .. " error: " .. tostring(err)) end
+    Status(who .. ": going back to " .. tostring(homeIsland))
     GoHome(homeIsland, home)
     HoldEgg(false)
     Release(who)
+    Status(who .. ": done")
 end
+
+-- ── egg keeper: the Void egg is on Shadow Realm (LaunchEggConfig.Void.Island); if you are on another island or more
+-- than 25 studs from it, or the server answers "TooFar", travel there and stand in front of the egg ──
+local function EggIsland()
+    local cfg = LaunchEggConfig and LaunchEggConfig[EGG]
+    return (cfg and (cfg.Island or (cfg.Zone ~= "Spawn" and nil))) or "Spawn"
+end
+
+local function EggModel()
+    local eggs = workspace:FindFirstChild("Eggs")
+    return eggs and eggs:FindFirstChild(EGG)
+end
+
+local function EggStandPos(m)
+    local cf = m:GetPivot()
+    return cf.Position + cf.LookVector * 7 + Vector3.new(0, 2, 0)
+end
+
+local function GoToEgg()
+    Status("egg: going to the " .. EGG .. " egg on " .. EggIsland())
+    if not TravelTo(EggIsland()) then return false end
+    local m = WaitFor(EggModel, 15)
+    if not m then Status("egg: workspace.Eggs." .. EGG .. " not found on " .. tostring(CurrentIsland())) return false end
+    local pos = EggStandPos(m)
+    TeleportTo(pos, 0.8)
+    EggHome = { island = CurrentIsland(), pos = pos }
+    EggTooFar = false
+    Status("egg: at the " .. EGG .. " egg")
+    return true
+end
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        if EggWanted and BusyBy == nil then
+            local m = EggModel()
+            local hrp = GetHrp()
+            local far = EggTooFar or CurrentIsland() ~= EggIsland() or not m
+                or (hrp and (hrp.Position - EggStandPos(m)).Magnitude > 25)
+            if far then
+                Acquire("egg")
+                HoldEgg(true)
+                pcall(GoToEgg)
+                HoldEgg(false)
+                Release("egg")
+                task.wait(2)
+            end
+        end
+    end
+end)
 
 -- ── breakables: Void Crystal, Crystal Cluster, Glow Mushroom, ... (HoneyPot ingredients) ──
 -- Breakables are hit by ordinary taps while you stand within TapRange (14 studs) of their edge. Your own island
@@ -802,8 +886,9 @@ end
 
 LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function(alive)
     local data = GetData()
-    if not (data and IslandBreakableConfig) then return end
+    if not (data and IslandBreakableConfig) then Status("Breakables: config / data not ready") return end
     local spotsFolder = workspace:FindFirstChild("IslandBreakableSpots")
+    local anyReady = false
     for _, id in ipairs(SPOT_ORDER) do
         if not alive() then return end
         local cfg = SpotCfg(id)
@@ -814,6 +899,7 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
             local ready = 0
             pcall(function() ready = IslandBreakableConfig.GetReadyAt(data, id) end)
             if unlocked and (ready or 0) <= Now() then
+                anyReady = true
                 Trip("breakable", function()
                     if not TravelTo(cfg.Island) then return end
                     local sf = WaitFor(function() return workspace:FindFirstChild("IslandBreakableSpots") end, 10)
@@ -836,6 +922,7 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
             end
         end
     end
+    if not anyReady then Status("Breakables: all on cooldown or locked") end
 end)
 
 -- ── dig site (Autumn) ──
@@ -852,9 +939,9 @@ pcall(function() DigController = require(ReplicatedStorage.Controllers.Minigames
 LoopToggle("Auto Dig Site", 5, function(alive)
     local data = GetData()
     if not (data and DigConfig and DigController) then warn("[Dig] DigConfig / DigController not found") return end
-    local left = 0
-    pcall(function() left = DigConfig.Allowance(data.Digging or {}, os.time()) end)
-    if (left or 0) <= 0 then return end
+    local left, waitFor = 0, 0
+    pcall(function() left, waitFor = DigConfig.Allowance(data.Digging or {}, os.time()) end)
+    if (left or 0) <= 0 then Status(string.format("Dig: no digs left, %d min until reset", math.ceil((waitFor or 0) / 60))) return end
     Trip("dig", function()
         if not TravelTo("Autumn") then return end
         local zone = WaitFor(function()
@@ -909,7 +996,7 @@ LoopToggle("Auto Open Chests", 15, function(alive)
         if not alive() then return end
         local readyAt = 0
         pcall(function() readyAt = TapChestConfig.GetReadyAt(data, chest.Id) end)
-        if (readyAt or 0) - Now() <= 0 and IslandUnlocked(data, chest.Island) then
+        if (readyAt or 0) - Now() <= 0 then
             Trip("chest", function()
                 if not TravelTo(chest.Island) then return end
                 local m = WaitFor(function()
@@ -936,8 +1023,7 @@ local ShrineConfig = Req({ "Shared", "Game", "ShrineConfig" })
 local ShrineFailures = 0
 LoopToggle("Auto Shrine (Golden blessing)", 10, function(alive)
     if LocalPlayer:GetAttribute("ShrineBlessing") == "Golden" then ShrineFailures = 0 return end
-    if ShrineFailures >= 3 then return end -- gave up: see the console
-    if not IslandUnlocked(GetData(), "Autumn") then return end
+    if ShrineFailures >= 3 then Status("Shrine: gave up after 3 failed tries (see console)") return end
     Trip("shrine", function()
         if not TravelTo("Autumn") then return end
         local shrine = WaitFor(function()
@@ -1106,7 +1192,9 @@ LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
     local data = GetData()
     if not data then return end
     local col = data.Colosseum or {}
-    if (col.Cooldown or 0) + 7200 > os.time() then return end
+    local left = (col.Cooldown or 0) + 7200 - os.time()
+    if left > 0 then Status(string.format("PetDefense: cooldown, %d min left", math.ceil(left / 60))) return end
+    if LocalPlayer:GetAttribute("ColosseumActive") then Status("PetDefense: a run is already active") return end
     Trip("colosseum", function()
         local entrance = FindOnIslands("colosseum", function()
             local island = workspace:FindFirstChild("WaveDefence Island")
@@ -1271,9 +1359,10 @@ local MiningController
 pcall(function() MiningController = require(ReplicatedStorage.Controllers.Minigames.MiningController) end)
 
 LoopToggle("Auto Mine (cave)", 0.5, function(alive)
-    if not (MC and MW and MSave) then warn("[Mine] mining modules not found") task.wait(10) return end
+    if not (MC and MW and MSave) then Status("Mine: mining modules not found") task.wait(10) return end
     Acquire("mine")
     HoldEgg(true)
+    Status("Mine: " .. (LocalPlayer:GetAttribute("MiningActive") == true and "mining" or "going to the cave portal"))
     local ok, err = pcall(function()
         local hit, collect, stateRf = RF("MiningService", "Hit"), RF("MiningService", "CollectDrop"), RF("MiningService", "State")
         if LocalPlayer:GetAttribute("MiningActive") ~= true or not MineState then
