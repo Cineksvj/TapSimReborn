@@ -1320,6 +1320,8 @@ local function CellOre(x, y, z)
     return c
 end
 
+local BadCells = {} -- [key] = os.clock() until which the cell is skipped (rejected by the server)
+
 local function PickCell()
     local marker = MineMarker()
     if not (marker and MineState) then return nil end
@@ -1350,7 +1352,6 @@ end
 -- the server only accepts a hit when MiningSight.CanSee(marker, removed, eye, x, y, z) passes for your position
 -- ("That block is behind solid rock." otherwise), so every candidate spot is checked with the same function first.
 local MSight = Req({ "Shared", "Minigames", "Mining", "MiningSight" })
-local BadCells = {} -- [key] = os.clock() until which the cell is skipped
 
 local function CanSeeFrom(pos, x, y, z)
     if not MSight then return true end
