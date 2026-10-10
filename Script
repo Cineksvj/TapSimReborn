@@ -990,14 +990,30 @@ local EggWanted, EggConn = false, nil
 local EggHolds = 0 -- > 0 while a trip (crafting, digging, ...) keeps the egg paused
 local function HoldEgg(on) EggHolds = math.max(0, EggHolds + (on and 1 or -1)) end
 local Pending, NextSendAt = {}, 0 -- hatch requests waiting for the server answer: [Seq] = sent at
+local PendingCount = {} -- [Seq] = eggs asked for, so the next request only uses the slots still free
+-- free storage slots once every request in flight has landed
+local function FreeSlots()
+    local n, limit = Storage()
+    if not n then return 0 end
+    local inflight = 0
+    for seq in pairs(Pending) do inflight += PendingCount[seq] or 0 end
+    return limit - n - inflight
+end
+-- the count for the next request: the usual 8 / 3 / 1, capped by the free slots (0 = storage is full)
+local function NextCount()
+    local free = FreeSlots()
+    if free < 1 then return 0 end
+    return math.min(HatchCount(), free)
+end
 local EggTooFar = false -- set when the server answers "TooFar": the egg keeper below walks you back to the egg
 
-local function FireHatch()
+local function FireHatch(count)
     if LastClientSeq > Seq then Seq = LastClientSeq end -- continue the game's own counter
     Seq += 1
     InOwnHatch = true
-    EggEvent:FireServer({ Egg = EGG, Auto = false, Count = HatchCount(), Seq = Seq })
+    EggEvent:FireServer({ Egg = EGG, Auto = false, Count = count or HatchCount(), Seq = Seq })
     InOwnHatch = false
+    PendingCount[Seq] = count or HatchCount()
     return Seq
 end
 
@@ -1007,7 +1023,7 @@ end
 if EggResultEvent then
     EggResultEvent.OnClientEvent:Connect(function(r)
         if type(r) ~= "table" then return end
-        if r.Seq ~= nil then Pending[r.Seq] = nil else Pending[next(Pending) or 0] = nil end
+        if r.Seq ~= nil then Pending[r.Seq] = nil PendingCount[r.Seq] = nil else local k = next(Pending) or 0 Pending[k] = nil PendingCount[k] = nil end
         if r.Success == true or r.Forced == true then return end
         local wait = (r.Error == "RateLimited" and 0.4) or (r.Error == "Cancelled" and 0.1) or (r.Error == "StorageFull" and 1) or 2
         NextSendAt = os.clock() + wait
@@ -1134,10 +1150,12 @@ Main:CreateToggle({
             if now < NextSendAt then return end
             local open = 0
             for seq, sentAt in pairs(Pending) do
-                if now - sentAt > 12 then Pending[seq] = nil else open += 1 end
+                if now - sentAt > 12 then Pending[seq] = nil PendingCount[seq] = nil else open += 1 end
             end
             while open < MAX_INFLIGHT do
-                Pending[FireHatch()] = now
+                local count = NextCount()
+                if count < 1 then NextSendAt = now + 0.5 break end -- storage full: wait for the crafting planner
+                Pending[FireHatch(count)] = now
                 open += 1
             end
         end)
@@ -1362,6 +1380,11 @@ end
 local function Full()
     local n, limit = Storage()
     return n ~= nil and limit - n < HatchCount()
+end
+-- storage completely full: not even one egg fits any more
+local function Saturated()
+    local n, limit = Storage()
+    return n ~= nil and limit - n < 1
 end
 
 -- the circle you stand on to open a machine: a part tagged "InteractionPoint" named Golden / Diamond / Rainbow.
@@ -1812,13 +1835,20 @@ Main:CreateToggle({
         task.spawn(function()
             local held = false
             while my == CraftToken and not Killed do
-                if Full() then
+                -- planner: while the egg can still hatch something it keeps going (with 3 or 1 eggs when 8 do not fit);
+                -- a crafting trip costs ~20 s of hatching, so it is taken only when it frees a good chunk of storage,
+                -- or when the storage is completely full and nothing else helps.
+                local freeable = Full() and Freeable() or 0
+                local n, limit = Storage()
+                local worth = math.max(HatchCount() * 2, math.floor((limit or 150) * 0.08)) -- ~12 slots on a 150 storage
+                local pods = (function() local ready, total = RainbowReadyIds() return #ready end)()
+                if Full() and (Saturated() or freeable >= worth or pods > 0) then
                     if not held then HoldEgg(true) held = true end
                     task.wait(1.2) -- let hatches in flight land
-                    local freeable = Freeable()
-                    local n, limit = Storage()
+                    freeable = Freeable()
+                    n, limit = Storage()
                     local wantFree = math.max(HatchCount() * 4, math.floor((limit or 150) * 0.2))
-                    if freeable < 10 and JunkCleanup and Acquire("craft", 30) then
+                    if freeable < 10 and pods == 0 and JunkCleanup and Acquire("craft", 30) then
                         -- a trip would free almost nothing: make room by deleting junk instead and keep hatching
                         Status(string.format("storage %d/%d: a trip would free only %d slots, cleaning junk", n or 0, limit or 0, freeable))
                         local deleted = DeleteJunk(wantFree)
@@ -1831,8 +1861,10 @@ Main:CreateToggle({
                             task.wait(20)
                         end
                     end
-                    if not (my == CraftToken and Full()) then
-                        -- room was made without a trip
+                    if not (my == CraftToken and (Saturated() or freeable >= worth or pods > 0)) then
+                        -- room was made without a trip, or a trip is not worth it: keep hatching smaller counts
+                        if held then HoldEgg(false) held = false end
+                        task.wait(2)
                     elseif not Acquire("craft") then
                         task.wait(5)
                     elseif my ~= CraftToken then
@@ -1846,9 +1878,10 @@ Main:CreateToggle({
                         local okRun, err = pcall(function()
                             for _, stage in ipairs(STAGES) do
                                 if my ~= CraftToken then break end
-                                if Full() then did += CraftStage(stage) end
+                                did += CraftStage(stage)
                             end
-                            if my == CraftToken and Full() then did += CraftRainbow() end
+                            -- rainbow pods run in the background (30 s each), so start / claim them on every trip
+                            if my == CraftToken then did += CraftRainbow() end
                         end)
                         if not okRun then warn("[Craft] " .. tostring(err)) Status("craft error: " .. tostring(err)) end
                         -- still saturated after crafting everything: delete junk before going back to the egg
@@ -1858,15 +1891,20 @@ Main:CreateToggle({
                         if my == CraftToken then pcall(GoHome, homeIsland, home) end
                         StopHiding()
                         Release("craft")
-                        if Full() then
-                            task.wait(did == 0 and 20 or 2) -- nothing helped: wait, then re-check
-                        elseif held then
-                            HoldEgg(false) held = false
-                        end
+                        if held then HoldEgg(false) held = false end
+                        if Saturated() then task.wait(did == 0 and 20 or 2) end -- nothing helped: wait, then re-check
                     end
                 else
                     if held then HoldEgg(false) held = false end
-                    task.wait(0.15)
+                    if Full() then
+                        local nd = 0
+                        for _, ids in pairs(GetGroups("Diamond") or {}) do nd += #ids end
+                        Status(string.format("storage %d/%d: hatching %d at a time; a trip would free %d (worth it from %d); %d diamonds waiting for pods",
+                            n or 0, limit or 0, NextCount(), freeable, worth, nd))
+                        task.wait(3)
+                    else
+                        task.wait(0.15)
+                    end
                 end
             end
             if held then HoldEgg(false) end
@@ -2357,7 +2395,39 @@ LoopToggle("Auto Events (balloons, pigs, lucky blocks, meteors)", 0.2, function(
 end)
 
 -- ── pet defense (bone pit, Colosseum): you tap the enemies yourself; one run every 2 h ──
-local Opponents, ColRunning = {}, false
+-- Everything of it is kept off screen: the "Play / Not now" prompt (the entrance circle opens it), the wave HUD, the
+-- wave banner, the board and the relic reward menu. The relic is decided here: a better ring replaces, a worse one is kept.
+local Opponents, ColRunning, ColBusy = {}, false, false
+local PetDefToggle -- the switch of this feature (looked up after it is created)
+local function PetDefOn() return ColBusy or (PetDefToggle ~= nil and PetDefToggle.Value == true) end
+local ColGuis = { "WaveDefense", "WaveStartMessage", "ColosseumRewards" }
+local function HideColosseumGuis()
+    local pg = LocalPlayer:FindFirstChild("PlayerGui")
+    if not pg then return end
+    for _, name in ipairs(ColGuis) do
+        local g = pg:FindFirstChild(name)
+        if g and g:IsA("ScreenGui") and g.Enabled then g.Enabled = false end
+        if g and name == "WaveDefense" then local hud = g:FindFirstChild("WaveHUD") if hud then hud.Visible = false end end
+    end
+    pcall(function()
+        local island = workspace:FindFirstChild("WaveDefence Island")
+        local board = island and island:FindFirstChild("WaveDefense") and island.WaveDefense:FindFirstChild("Board")
+        local sg = board and board:FindFirstChild("SurfaceGUI")
+        if sg then sg.Enabled = false end
+    end)
+end
+-- the "Pet Defense: Play / Not now" prompt: answered "Not now" quietly while the switch is on (we start the run ourselves)
+pcall(function()
+    local MessageController = require(ReplicatedStorage.Controllers.UI.MessageController)
+    local orig = MessageController.ShowConfirm
+    MessageController.ShowConfirm = function(self, opts, ...)
+        if type(opts) == "table" and opts.Title == "Pet Defense" and PetDefOn() then
+            if type(opts.OnCancel) == "function" then task.defer(opts.OnCancel) end
+            return true
+        end
+        return orig(self, opts, ...)
+    end
+end)
 pcall(function()
     local function add(e) if type(e) == "table" and e.Id ~= nil then Opponents[e.Id] = e end end
     RE("ColosseumService", "WaveDefenseOpponentSpawned").OnClientEvent:Connect(add)
@@ -2373,21 +2443,57 @@ pcall(function()
     end)
     RE("ColosseumService", "WaveDefenseGameOver").OnClientEvent:Connect(function() ColRunning = false end)
 end)
+-- while a run is on (or a reward is pending) the game's Colosseum screens are kept off
+task.spawn(function()
+    while not Killed do
+        if PetDefOn() then HideColosseumGuis() end
+        task.wait(ColBusy and 0.1 or 0.5)
+    end
+end)
+
+-- rings: Bronze < Silver < Gold < Platinum < Diamond; same ring -> the one with the better boosts
+local RING_TIER = { BronzeRing = 1, SilverRing = 2, GoldRing = 3, PlatinumRing = 4, DiamondRing = 5 }
+local BOOST_WEIGHT = { ClickMultiplier = 1, HatchSpeed = 1.2, CriticalChance = 2, RebirthMultiplier = 2, SecretLuck = 4, Walkspeed = 0.1 }
+local function RingScore(r)
+    if type(r) ~= "table" then return -1 end
+    local tier = RING_TIER[tostring(r.Name)] or RING_TIER[(tostring(r.Name):gsub("%s", ""))] or 0
+    local s = tier * 100
+    for _, b in ipairs(type(r.Boosts) == "table" and r.Boosts or {}) do
+        if type(b) == "table" then s += (BOOST_WEIGHT[b.Type] or 1) * (tonumber(b.Value) or 0) * 100 end
+    end
+    return s
+end
+local function RingLabel(r) return type(r) == "table" and tostring(r.Name) or "none" end
+-- claims a pending relic reward: replace when the new ring scores higher, keep otherwise; returns true when one was handled
+local function ClaimRelic()
+    local data = GetData()
+    local col = data and data.Colosseum or {}
+    local pending = col.PendingReward
+    if type(pending) ~= "table" then return false end
+    local new, old = pending.NewRelic, col.Relic
+    local replace = old == nil or RingScore(new) > RingScore(old)
+    local r = Invoke(RF("ColosseumService", "ClaimMinigameReward"), replace and "replace" or "keep")
+    print(string.format("[PetDefense] relic %s: new %s (%d) vs current %s (%d) -> %s", replace and "REPLACED" or "kept", RingLabel(new), math.floor(RingScore(new)), RingLabel(old), math.floor(RingScore(old)), Dump(r)))
+    Status(string.format("PetDefense: %s %s (%s)", replace and "equipped" or "kept old ring, rejected", RingLabel(new), replace and "better" or "not better"))
+    return true
+end
 
 LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
     local data = GetData()
     if not data then return end
     local col = data.Colosseum or {}
+    if col.PendingReward ~= nil then ClaimRelic() task.wait(1) end
     local left = (col.Cooldown or 0) + 7200 - os.time()
     if left > 0 then Status(string.format("PetDefense: cooldown, %d min left", math.ceil(left / 60))) return end
     if LocalPlayer:GetAttribute("ColosseumActive") then Status("PetDefense: a run is already active") return end
     Trip("colosseum", function()
+        ColBusy = true
         local entrance = FindOnIslands("colosseum", function()
             local island = workspace:FindFirstChild("WaveDefence Island")
             local wd = island and island:FindFirstChild("WaveDefense")
             return wd and wd:FindFirstChild("Colosseum")
         end, 6)
-        if not entrance then warn("[PetDefense] colosseum entrance not found on any unlocked island") return end
+        if not entrance then warn("[PetDefense] colosseum entrance not found on any unlocked island") ColBusy = false return end
         local cf = entrance:IsA("Model") and entrance:GetPivot() or entrance.CFrame
         Opponents = {}
         local r
@@ -2396,19 +2502,22 @@ LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
             r = Invoke(RF("ColosseumService", "StartWaveDefense"))
             print("[PetDefense] StartWaveDefense try " .. try .. ": " .. Dump(r))
             if type(r) == "table" and not r.Error and not r.OnCooldown then break end
-            if type(r) == "table" and r.OnCooldown then return end
+            if type(r) == "table" and r.OnCooldown then ColBusy = false return end
             task.wait(1)
         end
-        if type(r) ~= "table" or r.OnCooldown or r.Error then Status("PetDefense: could not start (" .. Dump(r) .. ")") return end
+        if type(r) ~= "table" or r.OnCooldown or r.Error then Status("PetDefense: could not start (" .. Dump(r) .. ")") ColBusy = false return end
         if type(r.PendingSpawns) == "table" then for _, e in ipairs(r.PendingSpawns) do Opponents[e.Id] = e end end
         ColRunning = true
         local attack, crit = RF("ColosseumService", "AttackOpponent"), RF("ColosseumService", "CriticalAttackOpponent")
-        local lastCrit, t0 = -1e9, os.clock()
+        local lastCrit, t0, lastStatus = -1e9, os.clock(), 0
         while alive() and ColRunning and os.clock() - t0 < 1800 do
             local now = Now()
-            local best
+            local best, count = nil, 0
             for _, e in pairs(Opponents) do
-                if (e.SpawnTime or 0) <= now and (e.ArrivalTime or 0) > now and (not best or e.ArrivalTime < best.ArrivalTime) then best = e end
+                if (e.SpawnTime or 0) <= now and (e.ArrivalTime or 0) > now then
+                    count += 1
+                    if not best or e.ArrivalTime < best.ArrivalTime then best = e end
+                end
             end
             if best then
                 if now - lastCrit >= 4.1 then
@@ -2421,22 +2530,25 @@ LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
                     if res.NewArrivalTime then best.ArrivalTime = res.NewArrivalTime end
                 end
             end
+            if os.clock() - lastStatus > 2 then lastStatus = os.clock() Status(string.format("PetDefense: fighting, %d pets on the track", count)) end
             task.wait(0.13) -- server minimum 0.12 s between taps
         end
         if ColRunning then Invoke(RF("ColosseumService", "EndWaveDefense")) ColRunning = false end
         task.wait(2)
         Invoke(RF("ColosseumService", "ReturnFromArena"))
-        task.wait(1)
-        local d2 = GetData()
-        local c2 = d2 and d2.Colosseum or {}
-        if c2.PendingReward ~= nil then
-            local old, new = c2.Relic, c2.PendingReward
-            local replace = old == nil or (type(old) == "table" and type(new) == "table" and (new.Value or 0) > (old.Value or 0))
-            Invoke(RF("ColosseumService", "ClaimMinigameReward"), replace and "replace" or "keep")
-            print("[PetDefense] relic " .. (replace and "replaced" or "kept"))
+        -- the reward arrives a moment later; claim it, then make sure every Colosseum screen is gone
+        for _ = 1, 20 do
+            task.wait(0.5)
+            if ClaimRelic() then break end
         end
+        task.wait(1)
+        HideColosseumGuis()
+        ColBusy = false
+        HideColosseumGuis()
     end)
+    HideColosseumGuis()
 end)
+for _, t in ipairs(Config.Toggles) do if t.Name == "Auto Pet Defense (bone pit)" then PetDefToggle = t end end
 
 -- ── mining cave (Crystal Cave) ──
 -- Enter() at the portal, Hit(stateId, x, y, z) on grid cells that are exposed (top layer or next to a removed cell),
