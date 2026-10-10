@@ -13,18 +13,478 @@ pcall(function() if type(G.CorvusTapSim) == "table" and type(G.CorvusTapSim.Stop
 local Instance = {}
 G.CorvusTapSim = Instance
 
-local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
-local Window = Rayfield:CreateWindow({
-    Name = "Corvus Hub",
-    LoadingTitle = "Loading...",
-    LoadingSubtitle = "by Dastan",
-    ConfigurationSaving = { Enabled = false },
-})
-local Main = Window:CreateTab("Main", 4483362458)
+-- ═══════════════════════════════ CORVUS UI (own library) ═══════════════════════════════
+-- Sidebar (MAIN / UTILITY / SETTINGS) + pages of cards, a search box, a top-left info bar (FPS, ping, session time,
+-- executor), a performance graph and a saved config. Right Shift shows / hides the window.
+local UI, Config, Main -- the only names the feature code needs; everything else of the library stays in this block
+do
+local UIS = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local StatsService = game:GetService("Stats")
+local HttpService = game:GetService("HttpService")
+
+local Theme = {
+    Bg = Color3.fromRGB(13, 13, 15), Side = Color3.fromRGB(17, 17, 20), Card = Color3.fromRGB(21, 21, 25),
+    Card2 = Color3.fromRGB(27, 27, 32), Stroke = Color3.fromRGB(38, 38, 44), Text = Color3.fromRGB(236, 236, 240),
+    Muted = Color3.fromRGB(130, 130, 140), Accent = Color3.fromRGB(70, 130, 255), Bar = Color3.fromRGB(226, 60, 60),
+    Font = Enum.Font.Gotham, Bold = Enum.Font.GothamBold, Medium = Enum.Font.GothamMedium,
+}
+
+local function New(class, props, parent)
+    local o = Instance.new(class)
+    for k, v in pairs(props or {}) do o[k] = v end
+    if parent then o.Parent = parent end
+    return o
+end
+local function Corner(p, r) return New("UICorner", { CornerRadius = UDim.new(0, r or 8) }, p) end
+local function Border(p, c, t) return New("UIStroke", { Color = c or Theme.Stroke, Thickness = t or 1, ApplyStrokeMode = Enum.ApplyStrokeMode.Border }, p) end
+local function Pad(p, l, t, r, b) return New("UIPadding", { PaddingLeft = UDim.new(0, l), PaddingTop = UDim.new(0, t or l), PaddingRight = UDim.new(0, r or l), PaddingBottom = UDim.new(0, b or t or l) }, p) end
+local function VList(p, gap) return New("UIListLayout", { FillDirection = Enum.FillDirection.Vertical, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, gap or 6) }, p) end
+local function HList(p, gap, valign) return New("UIListLayout", { FillDirection = Enum.FillDirection.Horizontal, SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, gap or 6), VerticalAlignment = valign or Enum.VerticalAlignment.Center }, p) end
+local function Label(p, text, size, color, font, props)
+    local l = New("TextLabel", { BackgroundTransparency = 1, Text = text, TextSize = size or 13, TextColor3 = color or Theme.Text,
+        Font = font or Theme.Font, TextXAlignment = Enum.TextXAlignment.Left, Size = UDim2.new(1, 0, 0, size and size + 6 or 19) }, p)
+    for k, v in pairs(props or {}) do l[k] = v end
+    return l
+end
+local function Tween(o, props, t) TweenService:Create(o, TweenInfo.new(t or 0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), props):Play() end
+
+local function GuiParent()
+    local ok, hui = pcall(function() return gethui and gethui() end)
+    if ok and typeof(hui) == "Instance" then return hui end
+    local ok2, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok2 and cg then return cg end
+    return LocalPlayer:WaitForChild("PlayerGui")
+end
+
+UI = { Pages = {}, Toggles = {}, Refreshers = {}, Visible = true }
+
+local Screen = New("ScreenGui", { Name = "CorvusUI", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 1000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, GuiParent())
+UI.Screen = Screen
+
+-- ── window ──
+local Win = New("Frame", { Name = "Window", Size = UDim2.fromOffset(880, 600), Position = UDim2.new(0.5, -440, 0.5, -300), BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ClipsDescendants = true }, Screen)
+Corner(Win, 12) Border(Win, Theme.Stroke, 1)
+local Side = New("Frame", { Name = "Side", Size = UDim2.new(0, 190, 1, 0), BackgroundColor3 = Theme.Side, BorderSizePixel = 0 }, Win)
+New("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0 }, Side)
+local Content = New("Frame", { Name = "Content", Size = UDim2.new(1, -190, 1, 0), Position = UDim2.new(0, 190, 0, 0), BackgroundTransparency = 1 }, Win)
+
+-- sidebar
+local SideTop = New("Frame", { Size = UDim2.new(1, 0, 1, -90), BackgroundTransparency = 1 }, Side)
+Pad(SideTop, 14, 18, 14, 0) VList(SideTop, 4)
+Label(SideTop, "Corvus", 18, Theme.Text, Theme.Bold, { Size = UDim2.new(1, 0, 0, 28), LayoutOrder = 0 })
+New("Frame", { Size = UDim2.new(1, 0, 0, 10), BackgroundTransparency = 1, LayoutOrder = 1 }, SideTop)
+local SideBottom = New("Frame", { Size = UDim2.new(1, 0, 0, 90), Position = UDim2.new(0, 0, 1, -90), BackgroundTransparency = 1 }, Side)
+Pad(SideBottom, 14, 0, 14, 12)
+New("Frame", { Size = UDim2.new(1, 0, 0, 1), Position = UDim2.new(0, 0, 0, 0), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0 }, SideBottom)
+Label(SideBottom, "made with corvus lib", 10, Theme.Muted, Theme.Font, { Position = UDim2.new(0, 0, 0, 6), Size = UDim2.new(1, 0, 0, 14) })
+local UserCard = New("Frame", { Size = UDim2.new(1, 0, 0, 44), Position = UDim2.new(0, 0, 1, -44), BackgroundTransparency = 1 }, SideBottom)
+local Avatar = New("ImageLabel", { Size = UDim2.fromOffset(34, 34), Position = UDim2.new(0, 0, 0.5, -17), BackgroundColor3 = Theme.Card2, BorderSizePixel = 0 }, UserCard)
+Corner(Avatar, 17)
+pcall(function()
+    local img = Players:GetUserThumbnailAsync(LocalPlayer.UserId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size100x100)
+    Avatar.Image = img
+end)
+Label(UserCard, LocalPlayer.DisplayName, 13, Theme.Text, Theme.Medium, { Position = UDim2.new(0, 42, 0, 5), Size = UDim2.new(1, -42, 0, 16) })
+Label(UserCard, "Owner", 11, Theme.Muted, Theme.Font, { Position = UDim2.new(0, 42, 0, 22), Size = UDim2.new(1, -42, 0, 14) })
+
+-- header
+local Header = New("Frame", { Size = UDim2.new(1, 0, 0, 62), BackgroundTransparency = 1 }, Content)
+Pad(Header, 16, 14, 16, 0)
+local Search = New("Frame", { Size = UDim2.new(0, 300, 0, 32), BackgroundColor3 = Theme.Card, BorderSizePixel = 0 }, Header)
+Corner(Search, 8) Border(Search)
+Label(Search, "⌕", 15, Theme.Muted, Theme.Font, { Position = UDim2.new(0, 10, 0, 6), Size = UDim2.new(0, 18, 0, 20) })
+local SearchBox = New("TextBox", { BackgroundTransparency = 1, Position = UDim2.new(0, 30, 0, 0), Size = UDim2.new(1, -90, 1, 0), PlaceholderText = "Search", PlaceholderColor3 = Theme.Muted,
+    Text = "", TextColor3 = Theme.Text, TextSize = 13, Font = Theme.Font, TextXAlignment = Enum.TextXAlignment.Left, ClearTextOnFocus = false }, Search)
+local Hint = New("TextLabel", { BackgroundColor3 = Theme.Card2, BorderSizePixel = 0, Size = UDim2.fromOffset(46, 20), Position = UDim2.new(1, -54, 0, 6), Text = "Ctrl+F", TextSize = 10, TextColor3 = Theme.Muted, Font = Theme.Medium }, Search)
+Corner(Hint, 5)
+local PageTitle = Label(Header, "Dashboard", 14, Theme.Text, Theme.Bold, { Position = UDim2.new(0, 316, 0, 2), Size = UDim2.new(0, 300, 0, 18) })
+local PageSub = Label(Header, "Main", 10, Theme.Muted, Theme.Font, { Position = UDim2.new(0, 316, 0, 20), Size = UDim2.new(0, 300, 0, 14) })
+local HeaderButtons = New("Frame", { Size = UDim2.new(0, 120, 0, 32), Position = UDim2.new(1, -120, 0, 0), BackgroundTransparency = 1 }, Header)
+HList(HeaderButtons, 8).HorizontalAlignment = Enum.HorizontalAlignment.Right
+local function IconButton(text, cb)
+    local b = New("TextButton", { Size = UDim2.fromOffset(32, 32), BackgroundColor3 = Theme.Card, BorderSizePixel = 0, Text = text, TextSize = 15, TextColor3 = Theme.Muted, Font = Theme.Bold, AutoButtonColor = false }, HeaderButtons)
+    Corner(b, 8) Border(b)
+    b.MouseEnter:Connect(function() Tween(b, { BackgroundColor3 = Theme.Card2 }) end)
+    b.MouseLeave:Connect(function() Tween(b, { BackgroundColor3 = Theme.Card }) end)
+    b.MouseButton1Click:Connect(cb)
+    return b
+end
+local Body = New("Frame", { Size = UDim2.new(1, 0, 1, -62), Position = UDim2.new(0, 0, 0, 62), BackgroundTransparency = 1 }, Content)
+local Minimized = false
+IconButton("–", function()
+    Minimized = not Minimized
+    Tween(Win, { Size = Minimized and UDim2.fromOffset(880, 62) or UDim2.fromOffset(880, 600) }, 0.2)
+end)
+IconButton("×", function() UI:SetVisible(false) end)
+
+function UI:SetVisible(v)
+    UI.Visible = v
+    Win.Visible = v
+end
+UIS.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then UI:SetVisible(not UI.Visible) end
+end)
+
+-- drag by the header / sidebar title
+do
+    local dragging, startPos, startInput
+    local function begin(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            dragging, startInput, startPos = true, input.Position, Win.Position
+        end
+    end
+    Header.InputBegan:Connect(begin)
+    SideTop.InputBegan:Connect(begin)
+    UIS.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local d = input.Position - startInput
+            Win.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+        end
+    end)
+    UIS.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then dragging = false end
+    end)
+end
+
+-- ── pages ──
+local NavGroups, NavOrder = {}, 10
+local function NavGroup(name)
+    if NavGroups[name] then return NavGroups[name] end
+    local g = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = NavOrder }, SideTop)
+    NavOrder += 1
+    VList(g, 2)
+    Label(g, string.upper(name), 10, Theme.Muted, Theme.Medium, { Size = UDim2.new(1, 0, 0, 22), LayoutOrder = 0 })
+    NavGroups[name] = g
+    return g
+end
+
+local CurrentPage = nil
+function UI:Page(name, group)
+    local page = { Name = name, Group = group, Sections = {}, Rows = {} }
+    local scroll = New("ScrollingFrame", { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Stroke,
+        CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y, Visible = false }, Body)
+    Pad(scroll, 16, 6, 16, 16)
+    local cols = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1 }, scroll)
+    HList(cols, 14, Enum.VerticalAlignment.Top)
+    page.Columns = {
+        New("Frame", { Size = UDim2.new(0.5, -7, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 1 }, cols),
+        New("Frame", { Size = UDim2.new(0.5, -7, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = 2 }, cols),
+    }
+    VList(page.Columns[1], 14) VList(page.Columns[2], 14)
+    page.Frame = scroll
+    local g = NavGroup(group or "MAIN")
+    local btn = New("TextButton", { Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = Theme.Card2, BackgroundTransparency = 1, BorderSizePixel = 0, Text = "", AutoButtonColor = false, LayoutOrder = #g:GetChildren() }, g)
+    Corner(btn, 8)
+    local mark = New("Frame", { Size = UDim2.fromOffset(3, 16), Position = UDim2.new(0, 6, 0.5, -8), BackgroundColor3 = Theme.Bar, BorderSizePixel = 0, Visible = false }, btn)
+    Corner(mark, 2)
+    local txt = Label(btn, name, 13, Theme.Muted, Theme.Medium, { Position = UDim2.new(0, 18, 0, 0), Size = UDim2.new(1, -18, 1, 0) })
+    page.Button, page.Mark, page.Text = btn, mark, txt
+    btn.MouseButton1Click:Connect(function() UI:Open(page) end)
+    btn.MouseEnter:Connect(function() if CurrentPage ~= page then Tween(btn, { BackgroundTransparency = 0.6 }) end end)
+    btn.MouseLeave:Connect(function() if CurrentPage ~= page then Tween(btn, { BackgroundTransparency = 1 }) end end)
+
+    local sectionCount = 0
+    function page:Section(title, column)
+        sectionCount += 1
+        local col = page.Columns[column or ((sectionCount % 2 == 1) and 1 or 2)]
+        local wrap = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundTransparency = 1, LayoutOrder = sectionCount }, col)
+        VList(wrap, 6)
+        Label(wrap, string.upper(title), 10, Theme.Muted, Theme.Medium, { Size = UDim2.new(1, 0, 0, 14), LayoutOrder = 0 })
+        local card = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Card, BorderSizePixel = 0, LayoutOrder = 1 }, wrap)
+        Corner(card, 10) Border(card) Pad(card, 12, 4, 12, 4)
+        VList(card, 0)
+        local section = { Card = card, Wrap = wrap, Count = 0 }
+
+        local function rowFrame(h)
+            section.Count += 1
+            local f = New("Frame", { Size = UDim2.new(1, 0, 0, h or 38), BackgroundTransparency = 1, LayoutOrder = section.Count }, card)
+            if section.Count > 1 then New("Frame", { Size = UDim2.new(1, 0, 0, 1), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0 }, f) end
+            return f
+        end
+        local function register(frame, text) table.insert(page.Rows, { Frame = frame, Text = string.lower(text) }) end
+
+        function section:Row(key, value)
+            local f = rowFrame(38)
+            Label(f, key, 13, Theme.Text, Theme.Font, { Size = UDim2.new(0.5, 0, 1, 0) })
+            local v = Label(f, type(value) == "function" and "" or tostring(value), 13, Theme.Muted, Theme.Font, { Size = UDim2.new(0.5, 0, 1, 0), Position = UDim2.new(0.5, 0, 0, 0), TextXAlignment = Enum.TextXAlignment.Right })
+            local obj = {}
+            function obj:Set(t) v.Text = tostring(t) end
+            if type(value) == "function" then table.insert(UI.Refreshers, function() local ok, r = pcall(value) if ok then v.Text = tostring(r) end end) end
+            register(f, key)
+            return obj
+        end
+
+        function section:Label(text)
+            local f = rowFrame(0)
+            f.AutomaticSize = Enum.AutomaticSize.Y
+            local l = Label(f, text, 13, Theme.Muted, Theme.Font, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextWrapped = true })
+            Pad(f, 0, 10, 0, 10)
+            local obj = {}
+            function obj:Set(t) l.Text = tostring(t) end
+            register(f, text)
+            return obj
+        end
+
+        function section:Button(text, cb)
+            local f = rowFrame(44)
+            local b = New("TextButton", { Size = UDim2.new(1, 0, 0, 32), Position = UDim2.new(0, 0, 0, 6), BackgroundColor3 = Theme.Card2, BorderSizePixel = 0, Text = text, TextSize = 13, TextColor3 = Theme.Text, Font = Theme.Medium, AutoButtonColor = false }, f)
+            Corner(b, 8) Border(b)
+            b.MouseEnter:Connect(function() Tween(b, { BackgroundColor3 = Theme.Stroke }) end)
+            b.MouseLeave:Connect(function() Tween(b, { BackgroundColor3 = Theme.Card2 }) end)
+            b.MouseButton1Click:Connect(function() task.spawn(cb) end)
+            register(f, text)
+        end
+
+        function section:Toggle(text, default, cb)
+            local f = rowFrame(40)
+            Label(f, text, 13, Theme.Text, Theme.Font, { Size = UDim2.new(1, -60, 1, 0) })
+            local sw = New("TextButton", { Size = UDim2.fromOffset(42, 22), Position = UDim2.new(1, -42, 0.5, -11), BackgroundColor3 = Theme.Card2, BorderSizePixel = 0, Text = "", AutoButtonColor = false }, f)
+            Corner(sw, 11) Border(sw)
+            local knob = New("Frame", { Size = UDim2.fromOffset(16, 16), Position = UDim2.new(0, 3, 0.5, -8), BackgroundColor3 = Theme.Muted, BorderSizePixel = 0 }, sw)
+            Corner(knob, 8)
+            local obj = { Value = false, Name = text }
+            local function paint()
+                Tween(sw, { BackgroundColor3 = obj.Value and Theme.Accent or Theme.Card2 })
+                Tween(knob, { Position = obj.Value and UDim2.new(1, -19, 0.5, -8) or UDim2.new(0, 3, 0.5, -8), BackgroundColor3 = obj.Value and Color3.new(1, 1, 1) or Theme.Muted })
+            end
+            function obj:Set(v, silent)
+                v = v and true or false
+                obj.Value = v
+                paint()
+                if not silent then task.spawn(cb, v) end
+                if UI.OnToggle then UI.OnToggle(obj) end
+            end
+            sw.MouseButton1Click:Connect(function() obj:Set(not obj.Value) end)
+            if default then obj.Value = true paint() end
+            register(f, text)
+            return obj
+        end
+
+        -- bar graph; sampler() returns value 0..1 and a caption
+        function section:Graph(sampler, bars)
+            local f = rowFrame(110)
+            local area = New("Frame", { Size = UDim2.new(1, 0, 0, 70), Position = UDim2.new(0, 0, 0, 12), BackgroundTransparency = 1 }, f)
+            local n = bars or 48
+            local items = {}
+            for i = 1, n do
+                items[i] = New("Frame", { Size = UDim2.new(1 / n, -2, 0, 2), Position = UDim2.new((i - 1) / n, 0, 1, -2), BackgroundColor3 = Theme.Bar, BorderSizePixel = 0 }, area)
+            end
+            local cap = Label(f, "", 10, Theme.Muted, Theme.Font, { Position = UDim2.new(0, 0, 1, -18), Size = UDim2.new(1, 0, 0, 14) })
+            local values = {}
+            table.insert(UI.Refreshers, function()
+                local ok, v, text = pcall(sampler)
+                if not ok then return end
+                table.insert(values, math.clamp(v or 0, 0, 1))
+                if #values > n then table.remove(values, 1) end
+                for i = 1, n do
+                    local val = values[#values - n + i] or 0
+                    local h = math.max(2, math.floor(val * 70))
+                    items[i].Size = UDim2.new(1 / n, -2, 0, h)
+                    items[i].Position = UDim2.new((i - 1) / n, 0, 1, -h)
+                end
+                cap.Text = text or ""
+            end)
+            register(f, "graph")
+        end
+
+        table.insert(page.Sections, section)
+        return section
+    end
+
+    table.insert(UI.Pages, page)
+    if not CurrentPage then UI:Open(page) end
+    return page
+end
+
+function UI:Open(page)
+    for _, p in ipairs(UI.Pages) do
+        local active = p == page
+        p.Frame.Visible = active
+        p.Mark.Visible = active
+        p.Text.TextColor3 = active and Theme.Text or Theme.Muted
+        p.Button.BackgroundTransparency = active and 0 or 1
+    end
+    CurrentPage = page
+    PageTitle.Text = page.Name
+    PageSub.Text = page.Group or "Main"
+    SearchBox.Text = ""
+end
+
+SearchBox:GetPropertyChangedSignal("Text"):Connect(function()
+    if not CurrentPage then return end
+    local q = string.lower(SearchBox.Text)
+    for _, r in ipairs(CurrentPage.Rows) do
+        r.Frame.Visible = q == "" or string.find(r.Text, q, 1, true) ~= nil
+    end
+end)
+UIS.InputBegan:Connect(function(input, gp)
+    if input.KeyCode == Enum.KeyCode.F and UIS:IsKeyDown(Enum.KeyCode.LeftControl) and UI.Visible then SearchBox:CaptureFocus() end
+end)
+
+-- ── notifications (bottom right) ──
+local NotifyHolder = New("Frame", { Size = UDim2.fromOffset(300, 400), Position = UDim2.new(1, -316, 1, -416), BackgroundTransparency = 1 }, Screen)
+VList(NotifyHolder, 8).VerticalAlignment = Enum.VerticalAlignment.Bottom
+function UI:Notify(title, text, seconds)
+    local n = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Card, BorderSizePixel = 0 }, NotifyHolder)
+    Corner(n, 10) Border(n) Pad(n, 12, 10, 12, 10) VList(n, 2)
+    Label(n, title, 13, Theme.Text, Theme.Bold, { Size = UDim2.new(1, 0, 0, 16), LayoutOrder = 1 })
+    Label(n, text or "", 12, Theme.Muted, Theme.Font, { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, TextWrapped = true, LayoutOrder = 2 })
+    task.delay(seconds or 4, function() pcall(function() n:Destroy() end) end)
+end
+
+-- ── info bar (top left): name · fps · ping · session time · executor ──
+local Bar = New("Frame", { Size = UDim2.new(0, 0, 0, 34), AutomaticSize = Enum.AutomaticSize.X, Position = UDim2.new(0, 16, 0, 14), BackgroundColor3 = Theme.Card, BorderSizePixel = 0 }, Screen)
+Corner(Bar, 10) Border(Bar) Pad(Bar, 12, 0, 12, 0) HList(Bar, 10)
+local function BarItem(text, order)
+    local l = New("TextLabel", { BackgroundTransparency = 1, Text = text, TextSize = 12, TextColor3 = Theme.Text, Font = Theme.Medium, Size = UDim2.new(0, 0, 1, 0), AutomaticSize = Enum.AutomaticSize.X, LayoutOrder = order }, Bar)
+    return l
+end
+local function BarSep(order) New("Frame", { Size = UDim2.new(0, 1, 0, 16), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0, LayoutOrder = order }, Bar) end
+local ExecutorName = "Unknown"
+pcall(function() local n, v = identifyexecutor() ExecutorName = tostring(n) .. (v and (" " .. tostring(v)) or "") end)
+BarItem(LocalPlayer.DisplayName, 1) BarSep(2)
+local FpsItem = BarItem("-- FPS", 3) BarSep(4)
+local PingItem = BarItem("-- ms", 5) BarSep(6)
+local TimeItem = BarItem("0:00", 7) BarSep(8)
+BarItem(ExecutorName, 9)
+
+-- fps / ping / session time
+local SessionStart = os.clock()
+local Frames, LastFpsAt, Fps = 0, os.clock(), 0
+RunService.RenderStepped:Connect(function()
+    Frames += 1
+    local now = os.clock()
+    if now - LastFpsAt >= 0.5 then
+        Fps = math.floor(Frames / (now - LastFpsAt) + 0.5)
+        Frames, LastFpsAt = 0, now
+    end
+end)
+local function Ping()
+    local ok, v = pcall(function() return StatsService.Network.ServerStatsItem["Data Ping"]:GetValue() end)
+    return ok and math.floor(v + 0.5) or 0
+end
+local function SessionTime()
+    local s = math.floor(os.clock() - SessionStart)
+    return string.format("%d:%02d", s // 60, s % 60)
+end
+UI.Fps, UI.Ping, UI.SessionTime = function() return Fps end, Ping, SessionTime
+task.spawn(function()
+    while not Killed do
+        FpsItem.Text = Fps .. " FPS"
+        PingItem.Text = Ping() .. " ms"
+        TimeItem.Text = SessionTime()
+        for _, r in ipairs(UI.Refreshers) do pcall(r) end
+        task.wait(0.5)
+    end
+end)
+
+function UI:Destroy()
+    pcall(function() Screen:Destroy() end)
+end
+
+-- ── saved config: every toggle's state, written on change, applied on the next start ──
+local ConfigFile = "CorvusTapSim.json"
+Config = { Data = { Toggles = {}, Autosave = true }, Toggles = {} }
+local DEFAULTS = { -- first start: these are ON
+    ["Auto Tap"] = true, ["Auto Open Void Egg"] = true, ["Auto Craft (Golden > Diamond > Rainbow)"] = true,
+    ["Auto Breakables (Void Crystal, clusters, mushrooms...)"] = true, ["Auto Dig Site"] = true, ["Auto Open Chests"] = true,
+    ["Auto Shrine (Golden blessing)"] = true, ["Auto Click Lucky Duck"] = true,
+    ["Auto Events (balloons, pigs, lucky blocks, meteors)"] = true, ["Auto Pet Defense (bone pit)"] = true,
+}
+pcall(function()
+    if isfile and readfile and isfile(ConfigFile) then
+        local d = HttpService:JSONDecode(readfile(ConfigFile))
+        if type(d) == "table" then
+            Config.Data.Toggles = type(d.Toggles) == "table" and d.Toggles or {}
+            if d.Autosave ~= nil then Config.Data.Autosave = d.Autosave end
+        end
+    end
+end)
+function Config.Save()
+    if not Config.Data.Autosave then return end
+    pcall(function() if writefile then writefile(ConfigFile, HttpService:JSONEncode(Config.Data)) end end)
+end
+function Config.Wanted(name)
+    local saved = Config.Data.Toggles[name]
+    if saved ~= nil then return saved == true end
+    return DEFAULTS[name] == true
+end
+UI.OnToggle = function(t)
+    Config.Data.Toggles[t.Name] = t.Value
+    Config.Save()
+end
+-- turns on every toggle the config wants; called once at the end of the script, one feature after another
+function Config.Apply()
+    for _, t in ipairs(Config.Toggles) do
+        if Config.Wanted(t.Name) and not t.Value then
+            t:Set(true)
+            task.wait(0.3)
+        end
+    end
+end
+
+-- ── pages of this hub ──
+local Dashboard = UI:Page("Dashboard", "MAIN")
+local Farm = UI:Page("Farm", "MAIN")
+local Settings = UI:Page("Settings", "SETTINGS")
+
+local Session = Dashboard:Section("Session", 1)
+Session:Row("Game", "Tap Simulator: Reborn")
+Session:Row("Server", string.sub(game.JobId, 1, 8))
+Session:Row("Players", function() return #Players:GetPlayers() .. " / " .. Players.MaxPlayers end)
+Session:Row("Session Time", SessionTime)
+Session:Row("Frame Rate", function() return Fps end)
+Session:Row("Ping", function() return Ping() .. " ms" end)
+Session:Row("Memory", function() return math.floor(StatsService:GetTotalMemoryUsageMb()) .. " MB" end)
+Session:Row("Executor", ExecutorName)
+local Welcome = Dashboard:Section("Welcome", 2)
+Welcome:Label(string.format("Good %s, %s. Press Right Shift to open or close the menu. Toggles are saved to %s and restored on the next start.",
+    (tonumber(os.date("%H")) or 12) < 12 and "morning" or (tonumber(os.date("%H")) or 12) < 18 and "afternoon" or "evening", LocalPlayer.DisplayName, ConfigFile))
+local StatusCard = Dashboard:Section("Status", 2)
+local Perf = Dashboard:Section("Performance", 1)
+Perf:Graph(function() return math.clamp(Fps / 240, 0, 1), "fps " .. Fps .. "  ·  ping " .. Ping() .. " ms" end)
+
+local FarmSec = Farm:Section("Automation", 1)
+local FarmSec2 = Farm:Section("Minigames & events", 2)
+
+local SettingsSec = Settings:Section("Config", 1)
+SettingsSec:Toggle("Autosave config", Config.Data.Autosave, function(v)
+    Config.Data.Autosave = v
+    pcall(function() if writefile then writefile(ConfigFile, HttpService:JSONEncode(Config.Data)) end end)
+end)
+SettingsSec:Button("Turn everything on", function() for _, t in ipairs(Config.Toggles) do if not t.Value then t:Set(true) task.wait(0.3) end end end)
+SettingsSec:Button("Turn everything off", function() for _, t in ipairs(Config.Toggles) do if t.Value then t:Set(false) end end end)
+SettingsSec:Button("Reset config to defaults", function()
+    Config.Data.Toggles = {}
+    pcall(function() if writefile then writefile(ConfigFile, HttpService:JSONEncode(Config.Data)) end end)
+    UI:Notify("Config", "Reset. Defaults apply on the next start.")
+end)
+local InfoSec = Settings:Section("Info", 2)
+InfoSec:Row("Toggle menu", "Right Shift")
+InfoSec:Row("Search", "Ctrl+F")
+InfoSec:Row("Config file", ConfigFile)
+
+-- compatibility with the feature code below: Main:CreateToggle / Main:CreateLabel
+Main = {}
+local ToggleCount = 0
+function Main:CreateToggle(opts)
+    ToggleCount += 1
+    local sec = ToggleCount <= 4 and FarmSec or FarmSec2
+    local t = sec:Toggle(opts.Name, false, opts.Callback)
+    table.insert(Config.Toggles, t)
+    return t
+end
+function Main:CreateLabel(text)
+    return StatusCard:Label(text)
+end
 Instance.Stop = function()
     Killed = true
-    pcall(function() Rayfield:Destroy() end)
+    pcall(function() UI:Destroy() end)
 end
+UI:Open(Dashboard)
+end -- of the library block
 
 local function WaitForPath(names, timeout)
     local obj = ReplicatedStorage
@@ -1656,4 +2116,11 @@ LoopToggle("Auto Find Shiny Stars", 20, function(alive)
         end
         if startIsland and alive() then TravelTo(startIsland) end
     end)
+end)
+
+-- ═══════════ START: turn on everything the saved config (or the defaults) wants ═══════════
+task.spawn(function()
+    task.wait(1)
+    Config.Apply()
+    UI:Notify("Corvus", "Loaded. Right Shift opens the menu.", 5)
 end)
