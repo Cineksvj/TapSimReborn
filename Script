@@ -1447,11 +1447,22 @@ local function IsHatchGui(obj)
     if n == "hatching" then return false end
     return string.find(n, "reveal") or string.find(n, "opening")
 end
+-- the hatch animation lives on the game's "Hatching" screen; while the opener runs that screen is kept disabled
+-- (never destroyed: the egg controller keeps a reference to it), so no egg animation plays at all
+local function KeepHatchingOff(g)
+    if not (g and g:IsA("ScreenGui") and g.Name == "Hatching") then return end
+    if g:GetAttribute("CorvusHooked") then return end
+    g:SetAttribute("CorvusHooked", true)
+    g:GetPropertyChangedSignal("Enabled"):Connect(function() if EggWanted and g.Enabled then g.Enabled = false end end)
+    if EggWanted then g.Enabled = false end
+end
 pcall(function()
     local pg = LocalPlayer:WaitForChild("PlayerGui")
     pg.ChildAdded:Connect(function(child)
         if EggWanted and IsHatchGui(child) then pcall(function() child:Destroy() end) end
+        KeepHatchingOff(child)
     end)
+    KeepHatchingOff(pg:FindFirstChild("Hatching"))
 end)
 
 Main:CreateToggle({
@@ -1460,6 +1471,10 @@ Main:CreateToggle({
     Callback = function(Value)
         EggWanted = Value
         if EggConn then EggConn:Disconnect() EggConn = nil end
+        pcall(function()
+            local g = LocalPlayer.PlayerGui:FindFirstChild("Hatching")
+            if g then KeepHatchingOff(g) g.Enabled = not Value end
+        end)
         if not Value then return end
         if not EggEvent then warn("[Egg] remote not found") return end
         -- the game's own "Hatch animation: Off" (3): the hatch renderer never takes the HUD away for a reveal.
@@ -1603,16 +1618,30 @@ local function IslandUnlocked(data, island)
     return type(p) == "table" and type(p.UnlockedIslands) == "table" and p.UnlockedIslands[island] == true
 end
 
+local LastTravelAt = 0
+local TRAVEL_GAP = 3 -- the server refuses island travels that come faster than this ("too fast")
 local function TravelTo(island)
     if island == nil or CurrentIsland() == island then return true end
     Status("travelling to " .. island .. " (now on " .. tostring(CurrentIsland()) .. ")")
     local travel = RF("IslandService", "Travel")
     if not travel then Status("IslandService.RF.Travel remote not found") return false end
-    local r = Invoke(travel, { Island = island, Source = "Menu" })
-    if island == "Spawn" and not (type(r) == "table" and r.Success) then
-        r = Invoke(travel, { ReturnToSpawn = true, Source = "Menu" })
+    local r
+    for attempt = 1, 4 do
+        local gap = TRAVEL_GAP - (os.clock() - LastTravelAt)
+        if gap > 0 then task.wait(gap) end
+        LastTravelAt = os.clock()
+        r = Invoke(travel, { Island = island, Source = "Menu" })
+        if island == "Spawn" and not (type(r) == "table" and r.Success) then
+            r = Invoke(travel, { ReturnToSpawn = true, Source = "Menu" })
+        end
+        print("[Travel] -> " .. island .. " (try " .. attempt .. "): " .. Dump(r))
+        local reason = type(r) == "table" and tostring(r.Reason or r.Error or "") or ""
+        local tooFast = string.find(string.lower(reason), "fast") or string.find(string.lower(reason), "wait") or reason == "RateLimited"
+        if type(r) == "table" and r.Success then break end
+        if not tooFast then break end
+        Status("travel: the game says '" .. reason .. "', trying again in 3 s")
+        task.wait(3)
     end
-    print("[Travel] -> " .. island .. ": " .. Dump(r))
     for _ = 1, 200 do
         if CurrentIsland() == island then
             Status("arrived on " .. island .. ", waiting for it to load")
