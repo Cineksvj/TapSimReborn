@@ -1458,6 +1458,7 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
                         BadCells[key] = os.clock() + 120
                         break
                     end
+                    Status("Mine: moving to " .. ore.name .. " at " .. key)
                     TeleportTo(spot, 0.45) -- give the server time to see the new position
                 end
                 local r = Invoke(hit, MineState.Id, x, y, z)
@@ -1473,6 +1474,10 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
                 else
                     hits += 1
                     if r.State then ApplyState(r.State) end
+                    local hp = (type(r.Health) == "number" and r.Health) or ore.health
+                    local dmg = (type(r.Damage) == "number" and r.Damage) or (hits * tool.Damage)
+                    Status(string.format("Mine: %s at %s  %d/%d dmg (%d hits) | bag %s/%s | %d mined",
+                        ore.name, key, math.min(dmg, hp), hp, hits, tostring(MineState.Count), tostring(MineState.Capacity), mined))
                     if r.Broken then
                         mined += 1
                         Removed[r.Key or MC.Key(x, y, z)] = true
