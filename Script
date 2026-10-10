@@ -1497,13 +1497,14 @@ local function TravelTo(island)
         r = Invoke(travel, { ReturnToSpawn = true, Source = "Menu" })
     end
     print("[Travel] -> " .. island .. ": " .. Dump(r))
-    for _ = 1, 80 do
+    for _ = 1, 200 do
         if CurrentIsland() == island then
             Status("arrived on " .. island .. ", waiting for it to load")
-            task.wait(2) -- let the island stream in
+            local t0 = os.clock()
+            repeat task.wait(0.1) until os.clock() - t0 > 0.4 and (Island(island) ~= nil or os.clock() - t0 > 1.5)
             return true
         end
-        task.wait(0.25)
+        task.wait(0.1)
     end
     Status("travel to " .. island .. " failed: " .. Dump(r) .. " (still on " .. tostring(CurrentIsland()) .. ")")
     return false
@@ -1515,7 +1516,7 @@ local function WaitFor(finder, seconds)
     repeat
         local obj = finder()
         if obj then return obj end
-        task.wait(0.25)
+        task.wait(0.1)
     until os.clock() - t0 > (seconds or 10)
     return nil
 end
@@ -1641,7 +1642,10 @@ local function TeleportTo(pos, settle)
     if not hrp then return false end
     hrp.AssemblyLinearVelocity = Vector3.zero
     hrp.CFrame = CFrame.new(pos)
-    task.wait(settle or 0.5)
+    RunService.Heartbeat:Wait()
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.CFrame = CFrame.new(pos)
+    task.wait(settle or 0.3)
     return true
 end
 
@@ -1656,14 +1660,14 @@ local function GoTo(pointName)
         warn("[Craft] " .. pointName .. " machine circle not found on any unlocked island; skipping it for 5 min")
         return false
     end
-    if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 1.2) end -- 1.2 s so the server sees the move
+    if (hrp.Position - target).Magnitude > 2.5 then TeleportTo(target, 0.5) end -- 0.5 s so the server sees the move
     return true
 end
 
 -- after "You must be near the ... Machine": stand on the circle again and give the server time
 local function ReGoTo(pointName)
     local target = MachineTarget(pointName)
-    if target then TeleportTo(target + Vector3.new(0, 0.5, 0), 1.2) end
+    if target then TeleportTo(target + Vector3.new(0, 0.5, 0), 0.5) end
 end
 
 -- ── keep the crafting GUI closed while we craft ──
@@ -2259,7 +2263,7 @@ local function GoHome(island, pos)
     pcall(function() local hrp = GetHrp() if hrp and hrp.Anchored then hrp.Anchored = false end end)
     if EggWanted and EggHome then island, pos = EggHome.island, EggHome.pos end
     if island and CurrentIsland() ~= island then TravelTo(island) end
-    if pos then TeleportTo(pos + Vector3.new(0, 1, 0), 0.4) end
+    if pos then TeleportTo(pos + Vector3.new(0, 1, 0), 0.15) end
 end
 
 local function Trip(who, body)
@@ -2300,7 +2304,7 @@ local function GoToEgg()
     local m = WaitFor(EggModel, 15)
     if not m then Status("egg: workspace.Eggs." .. EGG .. " not found on " .. tostring(CurrentIsland())) return false end
     local pos = EggStandPos(m)
-    TeleportTo(pos, 0.8)
+    TeleportTo(pos, 0.35)
     EggHome = { island = CurrentIsland(), pos = pos }
     EggTooFar = false
     Status("egg: at the " .. EGG .. " egg")
@@ -2398,7 +2402,7 @@ LoopToggle("Auto Breakables (Void Crystal, clusters, mushrooms...)", 3, function
                     local sf = WaitFor(function() return workspace:FindFirstChild("IslandBreakableSpots") end, 10)
                     pos = (sf and sf:GetAttribute(id)) or pos
                     if typeof(pos) ~= "Vector3" then warn("[Breakable] " .. id .. ": spot position not published yet") return end
-                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.5)
+                    TeleportTo(pos + Vector3.new(0, 4, 0), 0.3)
                     local m
                     for _ = 1, 40 do -- the server spawns your instance once you are near the spot
                         m = FindBreakable(function(t) return t == cfg.Type end)
@@ -2445,7 +2449,7 @@ LoopToggle("Auto Dig Site", 5, function(alive)
             return site and site:FindFirstChild("DigZone")
         end, 15)
         if not zone then warn("[Dig] dig site not found on Autumn") return end
-        TeleportTo(zone.Position + Vector3.new(0, 2, 0), 0.8)
+        TeleportTo(zone.Position + Vector3.new(0, 2, 0), 0.35)
         local lastWhy, idle = nil, 0
         while alive() do
             local l = 0
@@ -2465,7 +2469,7 @@ LoopToggle("Auto Dig Site", 5, function(alive)
                 local r = DigController:Activate()
                 local why = type(r) == "table" and r.Error or nil
                 if why == "NotAtDigsite" then
-                    TeleportTo(zone.Position + Vector3.new(0, 2, 0), 0.5)
+                    TeleportTo(zone.Position + Vector3.new(0, 2, 0), 0.3)
                 elseif why and why ~= "Busy" and why ~= "TooSoon" and why ~= "Revealing" and why ~= "StaleRound" then
                     if why ~= lastWhy then warn("[Dig] " .. Dump(r)) lastWhy = why end
                     if why == "Cooldown" or why == "MenuOpen" or why == "Typing" then idle += 1 end
@@ -2517,7 +2521,7 @@ LoopToggle("Auto Open Chests", 15, function(alive)
                 local front, size = m:GetAttribute("TapChestFront"), m:GetAttribute("TapChestSize")
                 local anchor = typeof(front) == "CFrame" and (front.Position - Vector3.new(0, (typeof(size) == "Vector3" and size.Y or 4) / 2, 0)) or m:GetPivot().Position
                 local look = typeof(front) == "CFrame" and front.LookVector or Vector3.new(0, 0, 1)
-                TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.8)
+                TeleportTo(anchor + look * 6 + Vector3.new(0, 3, 0), 0.35)
                 local r = Invoke(RF("TapChestService", "Claim"), chest.Id)
                 print("[Chest] " .. chest.Id .. ": " .. Dump(r))
                 task.wait(0.5)
@@ -2545,7 +2549,7 @@ LoopToggle("Auto Shrine (Golden blessing)", 10, function(alive)
         local circle = shrine:FindFirstChild("Circle")
         local att = circle and circle:FindFirstChild("PromptAttachment")
         local pos = att and att.WorldPosition or shrine:GetPivot().Position
-        TeleportTo(pos + Vector3.new(0, 3, 4), 0.8)
+        TeleportTo(pos + Vector3.new(0, 3, 4), 0.35)
         local r = Invoke(RF("ShrineService", "Choose"), "Golden")
         print("[Shrine] Choose(Golden): " .. Dump(r) .. " | blessing now = " .. tostring(LocalPlayer:GetAttribute("ShrineBlessing")))
         task.wait(1)
@@ -2889,7 +2893,7 @@ LoopToggle("Auto Pet Defense (bone pit)", 30, function(alive)
         Opponents = {}
         local r
         for try = 1, 3 do -- stand inside the entrance volume and let the server see it before starting
-            TeleportTo(cf.Position + Vector3.new(0, 1 + try, 0), 1.5)
+            TeleportTo(cf.Position + Vector3.new(0, 1 + try, 0), 0.3)
             r = Invoke(RF("ColosseumService", "StartWaveDefense"))
             print("[PetDefense] StartWaveDefense try " .. try .. ": " .. Dump(r))
             if type(r) == "table" and not r.Error and not r.OnCooldown then break end
@@ -3072,7 +3076,7 @@ local function MineSell()
     task.wait(1)
     local pad
     pcall(function() pad = MW.Part("Sell") end)
-    if pad then TeleportTo(pad.Position + Vector3.new(0, 3, 0), 0.8) end
+    if pad then TeleportTo(pad.Position + Vector3.new(0, 3, 0), 0.35) end
     local r = Invoke(sell)
     if type(r) == "table" then ApplyState(r.State or r) print("[Mine] sold for " .. tostring(r.Sold or "?")) else warn("[Mine] sell: " .. tostring(r)) end
 end
@@ -3096,7 +3100,7 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
                 return p
             end, 15)
             if not portal then warn("[Mine] cave portal not found on Crystal Cave") task.wait(5) return end
-            TeleportTo(portal.CFrame.Position + Vector3.new(0, 2, 0), 0.5)
+            TeleportTo(portal.CFrame.Position + Vector3.new(0, 2, 0), 0.3)
             local r
             for _ = 1, 40 do -- wait for the game to enter (2 s debounce + transition)
                 if LocalPlayer:GetAttribute("MiningActive") == true then break end
@@ -3139,7 +3143,7 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
                         break
                     end
                     Status("Mine: moving to " .. ore.name .. " at " .. key)
-                    TeleportTo(spot, 0.45) -- give the server time to see the new position
+                    TeleportTo(spot, 0.3) -- give the server time to see the new position
                 end
                 local r = Invoke(hit, MineState.Id, x, y, z)
                 if type(r) ~= "table" then warn("[Mine] hit returned " .. tostring(r)) fails += 1 task.wait(0.5)
@@ -3233,7 +3237,7 @@ LoopToggle("Auto Find Shiny Stars", 20, function(alive)
                     else
                         local id = m:GetAttribute("ShinyStarId")
                         seen[id] = true
-                        TeleportTo(m:GetAttribute("ShinyStarCenter") + Vector3.new(0, 1, 0), 0.6)
+                        TeleportTo(m:GetAttribute("ShinyStarCenter") + Vector3.new(0, 1, 0), 0.3)
                         local r = Invoke(collect, id)
                         if type(r) == "table" and r.Success then print(string.format("[Stars] %s (%s/%s)", id, tostring(r.Found), tostring(r.Total)))
                         else warn("[Stars] " .. id .. ": " .. tostring(type(r) == "table" and r.Reason or r)) end
