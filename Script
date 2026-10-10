@@ -2256,6 +2256,7 @@ end
 -- While the egg opener is on, "home" is always the egg itself (see the egg keeper below).
 local EggHome = nil -- { island = ..., pos = Vector3 }
 local function GoHome(island, pos)
+    pcall(function() local hrp = GetHrp() if hrp and hrp.Anchored then hrp.Anchored = false end end)
     if EggWanted and EggHome then island, pos = EggHome.island, EggHome.pos end
     if island and CurrentIsland() ~= island then TravelTo(island) end
     if pos then TeleportTo(pos + Vector3.new(0, 1, 0), 0.4) end
@@ -2657,6 +2658,28 @@ local function IsEventBreakable(t)
     return string.find(t, "Meteor", 1, true) ~= nil or t == "MysteryEgg"
 end
 
+-- follow mode for flying targets: the character is anchored (no falling) and glides a little behind / below the
+-- target every frame until StopFollow(); the first jump there is still a teleport
+local Following = nil
+RunService.Heartbeat:Connect(function()
+    if not Following or Killed then return end
+    local hrp = GetHrp()
+    if not hrp then return end
+    local ok, pos = pcall(Following.get)
+    if not (ok and typeof(pos) == "Vector3") then return end
+    if not hrp.Anchored then hrp.Anchored = true end
+    hrp.AssemblyLinearVelocity = Vector3.zero
+    hrp.AssemblyAngularVelocity = Vector3.zero
+    local goal = CFrame.lookAt(pos + Following.offset, pos)
+    hrp.CFrame = hrp.CFrame:Lerp(goal, 0.3)
+end)
+local function Follow(get, offset) Following = { get = get, offset = offset or Vector3.new(0, -10, 6) } end
+local function StopFollow()
+    Following = nil
+    local hrp = GetHrp()
+    if hrp then hrp.Anchored = false hrp.AssemblyLinearVelocity = Vector3.zero end
+end
+
 local function EventWork(alive)
     local now = Now()
     local hrp = GetHrp()
@@ -2686,12 +2709,16 @@ local function EventWork(alive)
                 pcall(function() pos = BalloonFlight.Position(b, t) end)
                 if not pos then break end
                 hrp = GetHrp() or hrp
-                if (pos - hrp.Position).Magnitude > 110 then TeleportTo(pos - Vector3.new(0, 12, 0), 0.1) end
+                if not Following then
+                    if (pos - hrp.Position).Magnitude > 110 then TeleportTo(pos - Vector3.new(0, 10, 0), 0.05) end
+                    Follow(function() return BalloonFlight.Position(b, Now() - (b.LaunchedAt or Now())) end, Vector3.new(0, -10, 7))
+                end
                 hitB:FireServer(uid)
                 hits += 1
                 did = true
                 task.wait(0.12)
             end
+            StopFollow()
             if Balloons[uid] == nil then print("[Events] balloon popped after " .. hits .. " hits") end
             return did
         end
@@ -2710,12 +2737,16 @@ local function EventWork(alive)
                 pcall(function() pos = PigFlight.CFrame(p, t).Position end)
                 if not pos then break end
                 hrp = GetHrp() or hrp
-                if (pos - hrp.Position).Magnitude > 100 then TeleportTo(pos - Vector3.new(0, 8, 0), 0.1) end
+                if not Following then
+                    if (pos - hrp.Position).Magnitude > 100 then TeleportTo(pos - Vector3.new(0, 8, 0), 0.05) end
+                    Follow(function() return PigFlight.CFrame(p, Now() - (p.LaunchedAt or Now())).Position end, Vector3.new(0, -8, 7))
+                end
                 hitP:FireServer(uid)
                 hits += 1
                 did = true
                 task.wait(0.52)
             end
+            StopFollow()
             if Pigs[uid] == nil then print("[Events] pig caught after " .. hits .. " hits") end
             return did
         end
@@ -2748,7 +2779,9 @@ LoopToggle("Auto Events (balloons, pigs, lucky blocks, meteors)", 0.2, function(
         or FindBreakable(IsEventBreakable) ~= nil
     if not hasWork then return end
     Trip("events", function()
-        while alive() and EventWork(alive) do task.wait(0.05) end
+        local ok, err = pcall(function() while alive() and EventWork(alive) do task.wait(0.05) end end)
+        StopFollow()
+        if not ok then error(err) end
     end)
 end)
 
