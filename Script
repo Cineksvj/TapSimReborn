@@ -68,9 +68,9 @@ UI.Screen = Screen
 
 -- ── window: 890 x 650, sidebar 190 ──
 local W, H, SIDE = 890, 650, 190
-local Win = New("Frame", { Name = "Window", Size = UDim2.fromOffset(W, H), Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2), BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ClipsDescendants = true }, Screen)
-Corner(Win, 14) Border(Win, Theme.Stroke, 1)
-local Side = New("Frame", { Name = "Side", Size = UDim2.new(0, SIDE, 1, 0), BackgroundColor3 = Theme.Side, BorderSizePixel = 0 }, Win)
+local Win = New("Frame", { Name = "Window", Size = UDim2.fromOffset(W, H), Position = UDim2.new(0.5, -W / 2, 0.5, -H / 2), BackgroundColor3 = Theme.Bg, BackgroundTransparency = 0.08, BorderSizePixel = 0, ClipsDescendants = true }, Screen)
+Corner(Win, 18) Border(Win, Theme.Stroke, 1)
+local Side = New("Frame", { Name = "Side", Size = UDim2.new(0, SIDE, 1, 0), BackgroundColor3 = Theme.Side, BackgroundTransparency = 0.08, BorderSizePixel = 0 }, Win)
 New("Frame", { Size = UDim2.new(0, 1, 1, 0), Position = UDim2.new(1, -1, 0, 0), BackgroundColor3 = Theme.Stroke, BorderSizePixel = 0 }, Side)
 local Content = New("Frame", { Name = "Content", Size = UDim2.new(1, -SIDE, 1, 0), Position = UDim2.new(0, SIDE, 0, 0), BackgroundTransparency = 1 }, Win)
 
@@ -114,8 +114,6 @@ local function IconButton(text, cb, badge)
     if badge then
         local d = New("Frame", { Size = UDim2.fromOffset(8, 8), Position = UDim2.new(1, -11, 0, 5), BackgroundColor3 = Theme.Accent, BorderSizePixel = 0 }, b)
         Corner(d, 4)
-        b.Badge = nil
-        b:SetAttribute("Badge", true)
         b.MouseButton1Click:Connect(function() d.Visible = false end)
     end
     b.MouseButton1Click:Connect(function() task.spawn(cb) end)
@@ -197,7 +195,7 @@ function UI:Page(name, group, icon, chevron)
         VList(wrap, 8)
         Label(wrap, string.upper(title), 10, Theme.Muted, Theme.Medium, { Size = UDim2.new(1, 0, 0, 14), LayoutOrder = 0 })
         local card = New("Frame", { Size = UDim2.new(1, 0, 0, 0), AutomaticSize = Enum.AutomaticSize.Y, BackgroundColor3 = Theme.Card, BorderSizePixel = 0, LayoutOrder = 1 }, wrap)
-        Corner(card, 12) Border(card) Pad(card, 14, 4, 14, 4)
+        Corner(card, 14) Border(card) Pad(card, 16, 4, 16, 4)
         VList(card, 0)
         local section = { Card = card, Wrap = wrap, Count = 0 }
 
@@ -443,21 +441,22 @@ function Config.Apply()
 end
 
 -- ── pages of this hub ──
+-- plain symbols only (no code points that Roblox renders as colour emoji)
 local Dashboard = UI:Page("Dashboard", "MAIN", "⌂")
 local Farm = UI:Page("Farm", "MAIN", "✦")
-local Tools = UI:Page("Tools", "UTILITY", "⚒")
-local Settings = UI:Page("Settings", "SETTINGS", "⚙", true)
+local Tools = UI:Page("Tools", "UTILITY", "✺")
+local Settings = UI:Page("Settings", "SETTINGS", "✱", true)
 
 -- header buttons (right to left: close, minimize, theme, keybinds, notifications)
 local Minimized = false
-IconButton("×", function() UI:SetVisible(false) end)
-IconButton("–", function()
+IconButton("✕", function() UI:SetVisible(false) end)
+IconButton("—", function()
     Minimized = not Minimized
     Tween(Win, { Size = Minimized and UDim2.fromOffset(W, 70) or UDim2.fromOffset(W, H) }, 0.2)
 end)
-IconButton("◐", function() UI:Open(Settings) end)
-IconButton("⌨", function() UI:Notify("Keybinds", "Right Shift – menu · Ctrl+F – search", 4) end)
-IconButton("♪", function() UI:Notify("Corvus", "No new notifications", 3) end, true)
+IconButton("◑", function() UI:Open(Settings) end)
+IconButton("✎", function() UI:Notify("Keybinds", "Right Shift – menu · Ctrl+F – search", 4) end)
+IconButton("⚐", function() UI:Notify("Corvus", "No new notifications", 3) end, true)
 
 local Session = Dashboard:Section("Session", 1)
 Session:Row("Game", "Tap Simulator: Reborn")
@@ -474,7 +473,7 @@ Welcome:Profile(string.format("Good %s, %s", hour < 12 and "morning" or hour < 1
     "Press Right Shift to open or close the menu", { "1 keybind", "Dark theme", Config.Data.Autosave and "Autosave" or "No autosave" })
 local Shortcuts = Dashboard:Section("Shortcuts", 2)
 Shortcuts:Button("Farm", function() UI:Open(Farm) end, "✦")
-Shortcuts:Button("Tools", function() UI:Open(Tools) end, "⚒")
+Shortcuts:Button("Tools", function() UI:Open(Tools) end, "✺")
 Shortcuts:Button("Configs", function() UI:Open(Settings) end, "▤")
 local StatusCard = Dashboard:Section("Status", 2)
 local Perf = Dashboard:Section("Performance", 1)
