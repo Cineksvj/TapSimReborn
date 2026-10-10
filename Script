@@ -343,6 +343,29 @@ pcall(function()
     end
 end)
 
+-- the crafting cutscenes / glow / 3D stage are client-only: make them no-ops while a trip runs
+pcall(function()
+    local function stub(path, names)
+        local obj = ReplicatedStorage
+        for _, n in ipairs(path) do obj = obj:FindFirstChild(n) if not obj then return end end
+        local m = require(obj)
+        if type(m) ~= "table" or table.isfrozen(m) then return end
+        for _, name in ipairs(names) do
+            local real = m[name]
+            if type(real) == "function" then
+                m[name] = function(...)
+                    if Hiding then return nil end
+                    return real(...)
+                end
+            end
+        end
+    end
+    stub({ "Modules", "Client", "Pets", "GoldenMachineStage" }, { "Begin", "Arm", "Resolve" })
+    stub({ "Modules", "Client", "Pets", "DiamondMachineRig" }, { "Begin", "Arm", "Resolve" })
+    stub({ "Modules", "Client", "Pets", "DiamondCraftCutscene" }, { "Begin" })
+    stub({ "Modules", "Client", "Common", "ScreenGlow" }, { "Play" })
+end)
+
 local function ShowHud()
     pcall(function() if HudController then HudController:SetHudHidden(false, "Menu") end end)
 end
@@ -1139,4 +1162,91 @@ LoopToggle("Auto Mine (cave)", 0.5, function(alive)
     if not ok then warn("[Mine] " .. tostring(err)) end
     HoldEgg(false)
     Release("mine")
+end)
+
+-- ── shiny stars (15, two or three per island) ──
+-- The server only places the stars of the island you are on, so each island is visited with the game's own teleport
+-- (IslandService.RF.Travel) and the script waits for the island to load before it walks to the stars.
+-- Star models are tagged "ShinyStar" with attributes ShinyStarId / ShinyStarCenter; ShinyStarService.RF.Collect(id)
+-- works within ServerReach (22 studs). Found ones are in Data.ShinyStars.Found[id].
+local ShinyStarConfig = Req({ "Shared", "Game", "ShinyStarConfig" })
+local ISLANDS = { "Spawn", "Sky Island", "Autumn", "Mushroom", "Desert", "Crystal Cave", "Shadow Realm" }
+
+local function StarFound(data, id)
+    local ok, f = pcall(function() return ShinyStarConfig.IsFound(data, id) end)
+    if ok then return f == true end
+    local ss = data and data.ShinyStars
+    return type(ss) == "table" and type(ss.Found) == "table" and ss.Found[id] == true
+end
+
+local function MissingStarsOn(island, data)
+    local n = 0
+    for _, star in ipairs((ShinyStarConfig and ShinyStarConfig.Stars) or {}) do
+        if star.Island == island and not StarFound(data, star.Id) then n += 1 end
+    end
+    return n
+end
+
+local function IslandUnlocked(data, island)
+    if island == "Spawn" then return true end
+    local p = data and data.Progression
+    return type(p) == "table" and type(p.UnlockedIslands) == "table" and p.UnlockedIslands[island] == true
+end
+
+-- the game's own teleport; waits until the server says you arrived on that island
+local function TravelTo(island)
+    if LocalPlayer:GetAttribute("CurrentIsland") == island then return true end
+    local travel = RF("IslandService", "Travel")
+    local r = Invoke(travel, { Island = island, Source = "Menu" })
+    if island == "Spawn" and not (type(r) == "table" and r.Success) then
+        r = Invoke(travel, { ReturnToSpawn = true, Source = "Menu" })
+    end
+    for _ = 1, 60 do
+        if LocalPlayer:GetAttribute("CurrentIsland") == island then task.wait(1.5) return true end
+        task.wait(0.25)
+    end
+    warn("[Stars] could not travel to " .. island .. ": " .. tostring(type(r) == "table" and (r.Reason or r.Error) or r))
+    return false
+end
+
+LoopToggle("Auto Find Shiny Stars", 20, function(alive)
+    local data = GetData()
+    if not (data and ShinyStarConfig) then return end
+    local todo = {}
+    for _, island in ipairs(ISLANDS) do
+        if IslandUnlocked(data, island) and MissingStarsOn(island, data) > 0 then table.insert(todo, island) end
+    end
+    if #todo == 0 then return end
+    Trip("stars", function()
+        local startIsland = LocalPlayer:GetAttribute("CurrentIsland")
+        local collect = RF("ShinyStarService", "Collect")
+        for _, island in ipairs(todo) do
+            if not alive() then break end
+            if TravelTo(island) then
+                local seen = {}
+                local t0 = os.clock()
+                while alive() and os.clock() - t0 < 20 do
+                    local d = GetData() or data
+                    local m
+                    for _, star in ipairs(CollectionService:GetTagged("ShinyStar")) do
+                        local id = star:GetAttribute("ShinyStarId")
+                        if type(id) == "string" and not seen[id] and not StarFound(d, id) and typeof(star:GetAttribute("ShinyStarCenter")) == "Vector3" then m = star break end
+                    end
+                    if not m then
+                        if MissingStarsOn(island, d) == 0 or os.clock() - t0 > 8 then break end
+                        task.wait(0.5)
+                    else
+                        local id = m:GetAttribute("ShinyStarId")
+                        seen[id] = true
+                        TeleportTo(m:GetAttribute("ShinyStarCenter") + Vector3.new(0, 1, 0), 0.6)
+                        local r = Invoke(collect, id)
+                        if type(r) == "table" and r.Success then print(string.format("[Stars] %s (%s/%s)", id, tostring(r.Found), tostring(r.Total)))
+                        else warn("[Stars] " .. id .. ": " .. tostring(type(r) == "table" and r.Reason or r)) end
+                        task.wait(0.5)
+                    end
+                end
+            end
+        end
+        if startIsland and alive() then TravelTo(startIsland) end
+    end)
 end)
