@@ -203,7 +203,7 @@ task.spawn(function()
     end
 end)
 local ConfigFile = Folder .. "/config.json"
-Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil, Sounds = true, Volume = 45, Scale = 100, MenuKey = "RightShift", FpsCap = 0, JoinAlerts = false }, Toggles = {} }
+Config = { Data = { Toggles = {}, Binds = {}, Accent = 1, Glass = 35, Autosave = true, Win = nil, Page = nil, Sounds = true, Volume = 45, Anon = false, Scale = 100, MenuKey = "RightShift", FpsCap = 0, JoinAlerts = false }, Toggles = {} }
 pcall(function()
     if isfile and readfile and isfile(ConfigFile) then
         local d = HttpService:JSONDecode(readfile(ConfigFile))
@@ -229,6 +229,9 @@ SoundsOn = Config.Data.Sounds ~= false
 SoundVolume = tonumber(Config.Data.Volume) or 45
 
 -- ─────────────────────────── root ───────────────────────────
+local AnonAvatar = "rbxassetid://16898613869" -- a plain user glyph from the icon sheet (rect set below)
+local function Nick() return Config.Data.Anon and "Anonymous" or LocalPlayer.DisplayName end
+local function Handle() return Config.Data.Anon and "hidden" or ("@" .. LocalPlayer.Name) end
 UI = { Pages = {}, Index = {}, Refreshers = {}, AccentHooks = {}, History = {}, Unread = 0, Visible = true, Binds = {}, Toggles = {}, Status = "idle" }
 local Screen = H.New("ScreenGui", { Name = "CorvusHub", IgnoreGuiInset = true, ResetOnSpawn = false, DisplayOrder = 1000, ZIndexBehavior = Enum.ZIndexBehavior.Sibling }, GuiParent())
 UI.Screen = Screen
@@ -292,12 +295,51 @@ Footer[2] = H.Frame({ Position = UDim2.new(0, 14, 1, -86), Size = UDim2.new(0, S
 local Prof = H.Button({ Position = UDim2.new(0, 8, 1, -76), Size = UDim2.fromOffset(SIDE_W - 16, 64), BackgroundColor3 = T.White, BackgroundTransparency = 1, ZIndex = 3 }, Win)
 Footer[3] = Prof
 H.Corner(Prof, 12)
-local Avatar = H.New("ImageLabel", { Position = UDim2.fromOffset(8, 12), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = T.Field, BorderSizePixel = 0, Image = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150", ZIndex = 4 }, Prof)
+local AvatarUrl = "rbxthumb://type=AvatarHeadShot&id=" .. LocalPlayer.UserId .. "&w=150&h=150"
+local Avatar = H.New("ImageLabel", { Position = UDim2.fromOffset(8, 12), Size = UDim2.fromOffset(38, 38), BackgroundColor3 = T.Field, BorderSizePixel = 0, Image = AvatarUrl, ZIndex = 4 }, Prof)
 H.Corner(Avatar, 19)
 local Online = H.Frame({ AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, 1, 1, 1), Size = UDim2.fromOffset(11, 11), BackgroundColor3 = T.Green, ZIndex = 5 }, Avatar)
 H.Corner(Online, 6) H.New("UIStroke", { Color = T.Bg, Thickness = 2 }, Online)
-H.Text({ Text = LocalPlayer.DisplayName, Font = FONT_BOLD, TextSize = 13, TextColor3 = T.Text, Position = UDim2.fromOffset(56, 14), Size = UDim2.new(1, -82, 0, 18), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, Prof)
+local ProfName = H.Text({ Text = Nick(), Font = FONT_BOLD, TextSize = 13, TextColor3 = T.Text, Position = UDim2.fromOffset(56, 14), Size = UDim2.new(1, -82, 0, 18), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, Prof)
 H.Text({ Text = "Owner", TextSize = 12, TextColor3 = T.Sub, Position = UDim2.fromOffset(56, 32), Size = UDim2.new(1, -82, 0, 16), ZIndex = 4 }, Prof)
+UI.Avatars = { Avatar }
+function UI:ApplyAnon()
+    local anon = Config.Data.Anon == true
+    ProfName.Text = Nick()
+    for _, av in ipairs(UI.Avatars) do
+        if anon then av.Image = AnonAvatar av.ImageRectOffset = Vector2.new(661, 869) av.ImageRectSize = Vector2.new(48, 48) av.ImageColor3 = T.Sub av.ScaleType = Enum.ScaleType.Fit
+        else av.Image = AvatarUrl av.ImageRectSize = Vector2.zero av.ImageColor3 = T.White av.ScaleType = Enum.ScaleType.Stretch end
+    end
+    pcall(function() game:GetService("StarterGui"):SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList, not anon) end)
+    local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+    if hum then hum.DisplayName = anon and "Anonymous" or LocalPlayer.DisplayName end
+end
+-- anonymous mode in the game: your name above the head, the player list, and every on-screen text that shows it
+task.spawn(function()
+    local name, disp = LocalPlayer.Name, LocalPlayer.DisplayName
+    while not Killed do
+        task.wait(1)
+        if Config.Data.Anon then
+            pcall(function()
+                local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+                if hum and hum.DisplayName ~= "Anonymous" then hum.DisplayName = "Anonymous" end
+                local pg = LocalPlayer:FindFirstChild("PlayerGui")
+                if not pg then return end
+                for _, o in ipairs(pg:GetDescendants()) do
+                    if (o:IsA("TextLabel") or o:IsA("TextButton")) and not o:IsDescendantOf(Screen) then
+                        local t = o.Text
+                        if t ~= "" and (string.find(t, disp, 1, true) or string.find(t, name, 1, true)) then
+                            t = string.gsub(t, "@" .. name, "@anonymous")
+                            t = string.gsub(t, disp, "Anonymous")
+                            t = string.gsub(t, name, "Anonymous")
+                            o.Text = t
+                        end
+                    end
+                end
+            end)
+        end
+    end
+end)
 H.Icon("chevron-right", 14, T.Sub, { AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), ZIndex = 4 }, Prof)
 H.Hover(Prof, 1, 0.965, "BackgroundTransparency")
 Prof.MouseEnter:Connect(function() Play("hover") end)
@@ -693,12 +735,14 @@ function UI:Page(name, group, icon, desc)
         function section:Hero(greeting, sub, chips)
             section.N += 1
             local wrap = H.Frame({ Size = UDim2.new(1, 0, 0, 92), BackgroundTransparency = 1, LayoutOrder = section.N, ZIndex = 3 }, card)
-            local av = H.New("ImageLabel", { Position = UDim2.fromOffset(14, 16), Size = UDim2.fromOffset(60, 60), BackgroundColor3 = T.Field, BorderSizePixel = 0, Image = Avatar.Image, ZIndex = 4 }, wrap)
+            local av = H.New("ImageLabel", { Position = UDim2.fromOffset(14, 16), Size = UDim2.fromOffset(60, 60), BackgroundColor3 = T.Field, BorderSizePixel = 0, Image = AvatarUrl, ZIndex = 4 }, wrap)
             H.Corner(av, 30)
+            table.insert(UI.Avatars, av)
             local ring = H.New("UIStroke", { Color = T.Accent, Thickness = 2, Transparency = 0.2 }, av)
             H.OnAccent(function(a) ring.Color = a end)
-            H.Text({ Text = greeting, Font = FONT_BOLD, TextSize = 15, TextColor3 = T.Text, Position = UDim2.fromOffset(88, 16), Size = UDim2.new(1, -96, 0, 22), TextScaled = true, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
-            H.New("UITextSizeConstraint", { MaxTextSize = 16, MinTextSize = 10 }, wrap:FindFirstChildOfClass("TextLabel"))
+            local gl = H.Text({ Text = type(greeting) == "function" and greeting() or greeting, Font = FONT_BOLD, TextSize = 15, TextColor3 = T.Text, Position = UDim2.fromOffset(88, 16), Size = UDim2.new(1, -96, 0, 22), TextScaled = true, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
+            H.New("UITextSizeConstraint", { MaxTextSize = 16, MinTextSize = 10 }, gl)
+            if type(greeting) == "function" then table.insert(UI.Refreshers, function() gl.Text = greeting() end) end
             local subL = H.Text({ Text = type(sub) == "function" and sub() or sub, TextSize = 12, TextColor3 = T.Sub, Position = UDim2.fromOffset(88, 42), Size = UDim2.new(1, -96, 0, 16), TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4 }, wrap)
             if type(sub) == "function" then table.insert(UI.Refreshers, function() subL.Text = sub() end) end
             local row = H.Frame({ Position = UDim2.fromOffset(88, 62), Size = UDim2.new(1, -100, 0, 20), BackgroundTransparency = 1, ZIndex = 4 }, wrap)
@@ -930,7 +974,7 @@ local Perf = Dashboard:Section("Performance", "Left")
 Perf:Graph(function() return Fps end, 60)
 local Welcome = Dashboard:Section("Welcome", "Right")
 local hour = tonumber(os.date("%H")) or 12
-Welcome:Hero(string.format("Good %s, %s", hour < 12 and "morning" or hour < 18 and "afternoon" or "evening", LocalPlayer.DisplayName), function() return "Press " .. (Config.Data.MenuKey or "RightShift"):gsub("(%l)(%u)", "%1 %2") .. " to open or close the menu" end,
+Welcome:Hero(function() return string.format("Good %s, %s", hour < 12 and "morning" or hour < 18 and "afternoon" or "evening", Nick()) end, function() return "Press " .. (Config.Data.MenuKey or "RightShift"):gsub("(%l)(%u)", "%1 %2") .. " to open or close the menu" end,
     { function() local n = 0 for _ in pairs(UI.Binds) do n += 1 end return n .. (n == 1 and " keybind" or " keybinds") end, function() return ACCENTS[Config.Data.Accent or 1][1] .. " theme" end, "Autosave" })
 local Shortcuts = Dashboard:Section("Shortcuts", "Right")
 Shortcuts:Button("Features", function() UI:Open(Farm) end, "sparkles")
@@ -1002,9 +1046,9 @@ local function RefreshPlayers()
     table.sort(list, function(a, b) if a == LocalPlayer then return true end if b == LocalPlayer then return false end return a.DisplayName:lower() < b.DisplayName:lower() end)
     for i, row in ipairs(PlayerRows) do
         local p = list[i]
-        row.Key.Text = p and p.DisplayName or ""
+        row.Key.Text = p and (p == LocalPlayer and Nick() or p.DisplayName) or ""
         row.Key.Parent.Parent.Visible = p ~= nil
-        row:Set(p and ("@" .. p.Name) or "")
+        row:Set(p and (p == LocalPlayer and Handle() or ("@" .. p.Name)) or "")
     end
 end
 table.insert(UI.Refreshers, RefreshPlayers)
@@ -1017,6 +1061,8 @@ SetMenu:Keybind("Menu key", Config.Data.MenuKey or "RightShift", function(k) Con
 SetMenu:Row("Search", "Ctrl+F", "search")
 SetMenu:Row("Keybinds", "right-click a switch", "click")
 SetMenu:Slider("Menu size", 75, 130, Config.Data.Scale or 100, function(v) Config.Data.Scale = v Config.Save() H.Tween(WinScale, 0.3, { Scale = v / 100 }) end, "%", "maximize")
+local SetPriv = Settings:Section("Privacy", "Left")
+SetPriv:Toggle("Anonymous mode", Config.Data.Anon == true, function(v) Config.Data.Anon = v Config.Save() UI:ApplyAnon() end, "user", "Hides your name and avatar in the menu, above your head, in the player list and in the game's own texts")
 local SetSound = Settings:Section("Sounds", "Left")
 SetSound:Toggle("Menu sounds", Config.Data.Sounds ~= false, function(v) SoundsOn = v Config.Data.Sounds = v Config.Save() end, "activity")
 SetSound:Slider("Volume", 0, 100, Config.Data.Volume or 45, function(v) SoundVolume = v Config.Data.Volume = v Config.Save() Play("notify") end, "%", "activity")
@@ -1144,6 +1190,7 @@ HubInstance.Stop = function()
     Killed = true
     UI:Destroy()
 end
+UI:ApplyAnon()
 UI:Open(Config.Data.Page or "Dashboard")
 if not Current then UI:Open(Dashboard) end
 end -- of the library block
